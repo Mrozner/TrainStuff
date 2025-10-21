@@ -1,6 +1,7 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using System;
 using System.Diagnostics;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace ClaudeSepareted
 {
@@ -135,7 +136,15 @@ namespace ClaudeSepareted
 
         private async void AdminPanel(object sender, EventArgs e)
         {
-            await Navigation.PushAsync(new AdminPanelPage(_dbContext));
+            try
+            {
+                var adminPage = Handler.MauiContext.Services.GetRequiredService<AdminPanelPage>();
+                await Navigation.PushAsync(adminPage);
+            }
+            catch (Exception ex)
+            {
+                await DisplayAlert("Hiba", $"Nem sikerült megnyitni az admin panelt: {ex.Message}", "OK");
+            }
         }
 
 
