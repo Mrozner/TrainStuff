@@ -1,0 +1,124 @@
+﻿<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="ClaudeSepareted.MainPage"
+             Title="Vonat Menetrend"
+             x:Name="ThisPage">
+
+    <Grid ColumnDefinitions="*,Auto">
+        <!-- Bal oldali fő tartalom -->
+        <Grid Grid.Column="0" RowDefinitions="Auto,*" Padding="20" RowSpacing="15">
+
+            <!-- Felső fix rész (választók + idő) -->
+            <VerticalStackLayout Grid.Row="0" Spacing="15">
+
+                <!-- Vonat kiválasztása -->
+                <Picker x:Name="TrainPicker" 
+                        Title="Válassz vonatot"
+                        ItemDisplayBinding="{Binding Name}"
+                        SelectedItem="{Binding SelectedTrain}"
+                        ItemsSource="{Binding Trains}">
+                </Picker>
+
+                <!-- Kiinduló állomás -->
+                <Picker x:Name="StartPicker" 
+                        Title="Válassz indulási helyet"
+                        ItemDisplayBinding="{Binding Name}"
+                        SelectedItem="{Binding SelectedStartStation}"
+                        ItemsSource="{Binding Stations}">
+                </Picker>
+
+                <!-- Végállomás -->
+                <Picker x:Name="EndPicker" 
+                        Title="Válassz célállomást"
+                        ItemDisplayBinding="{Binding Name}"
+                        SelectedItem="{Binding SelectedEndStation}"
+                        ItemsSource="{Binding Stations}">
+                </Picker>
+
+                <!-- Idők egymás mellett -->
+                <Grid ColumnDefinitions="*,*">
+                    <VerticalStackLayout Grid.Column="0" Spacing="5">
+                        <Label Text="Indulási idő:" FontSize="16" />
+                        <TimePicker x:Name="StartTimePicker" Time="08:00:00" Format="HH:mm" />
+                    </VerticalStackLayout>
+                </Grid>
+
+            </VerticalStackLayout>
+
+            <!-- Görgethető menetrend lista -->
+            <CollectionView Grid.Row="1"
+                        x:Name="ScheduleCollection"
+                        ItemsSource="{Binding ScheduleItems}">
+                <CollectionView.ItemTemplate>
+                    <DataTemplate>
+                        <Grid ColumnDefinitions="100,*,40" HeightRequest="60" Padding="5">
+
+                            <!-- Bal oldalt vonat neve -->
+                            <Label Grid.Column="0"
+                                   Text="{Binding TrainName}"
+                                   VerticalOptions="Center"
+                                   HorizontalOptions="Start"
+                                   FontSize="14" />
+
+                            <!-- Középen grafikus idővonal -->
+                            <GraphicsView Grid.Column="1"
+                                          Drawable="{Binding Drawable}"
+                                          HeightRequest="60"
+                                          HorizontalOptions="Fill"
+                                          VerticalOptions="Center" />
+
+                            <!-- Jobb oldalt kuka gomb -->
+                            <Button Grid.Column="2"
+                                    Padding="5"
+                                    Text="🗑️"
+                                    FontSize="18"
+                                    BackgroundColor="Transparent"
+                                    VerticalOptions="Center"
+                                    Clicked="OnDeleteClicked" />
+                        </Grid>
+                    </DataTemplate>
+                </CollectionView.ItemTemplate>
+
+            </CollectionView>
+        </Grid>
+
+        <!-- Jobb oldali fix sáv -->
+        <Grid Grid.Column="1"
+          BackgroundColor="#E0E0E0"
+          Padding="10">
+            <VerticalStackLayout Spacing="20"
+                             VerticalOptions="End"
+                             HorizontalOptions="Center">
+                <!-- Fejlesztői mód gomb -->
+                <Frame Padding="0"
+                   WidthRequest="60"
+                   HeightRequest="60"
+                   CornerRadius="30"
+                   BackgroundColor="#2196F3"
+                   HasShadow="True">
+                    <Button Text="🛠️"
+                        FontSize="24"
+                        BackgroundColor="Transparent"
+                        TextColor="White"
+                        Clicked="AdminPanel"/>
+                </Frame>
+
+                <!-- Hozzáad gomb -->
+                <Frame Padding="0"
+                   WidthRequest="60"
+                   HeightRequest="60"
+                   CornerRadius="30"
+                   BackgroundColor="#FF9800"
+                   HasShadow="True">
+                    <Button Text="➕"
+                        FontSize="24"
+                        BackgroundColor="Transparent"
+                        TextColor="White"
+                        Clicked="OnAddClicked"/>
+                </Frame>
+            </VerticalStackLayout>
+        </Grid>
+    </Grid>
+
+</ContentPage>
