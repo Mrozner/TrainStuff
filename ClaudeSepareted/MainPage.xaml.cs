@@ -147,6 +147,77 @@ namespace ClaudeSepareted
             }
         }
 
+        private void OnSetVirtualTime(object sender, EventArgs e)
+        {
+            try
+            {
+                string hourText = HourEntry.Text?.Trim();
+                string minuteText = MinuteEntry.Text?.Trim();
+
+                if (int.TryParse(hourText, out int hours) && int.TryParse(minuteText, out int minutes))
+                {
+                    if (hours >= 0 && hours < 24 && minutes >= 0 && minutes < 60)
+                    {
+                        _viewModel.VirtualClock.SetTime(hours, minutes, 0);
+                        DisplayAlert("Success", $"Virtual time set to {hours:00}:{minutes:00}", "OK");
+                    }
+                    else
+                    {
+                        DisplayAlert("Error", "Hours must be 0-23 and minutes must be 0-59", "OK");
+                    }
+                }
+                else
+                {
+                    DisplayAlert("Error", "Please enter valid numbers for hours and minutes", "OK");
+                }
+            }
+            catch (Exception ex)
+            {
+                DisplayAlert("Error", $"Failed to set time: {ex.Message}", "OK");
+            }
+        }
+
+        private void OnPauseClock(object sender, EventArgs e)
+        {
+            try
+            {
+                _viewModel.VirtualClock.Pause();
+                DisplayAlert("Clock Paused", "Virtual clock has been paused", "OK");
+            }
+            catch (Exception ex)
+            {
+                DisplayAlert("Error", $"Failed to pause clock: {ex.Message}", "OK");
+            }
+        }
+
+        private void OnResumeClock(object sender, EventArgs e)
+        {
+            try
+            {
+                _viewModel.VirtualClock.Resume();
+                DisplayAlert("Clock Resumed", "Virtual clock has been resumed", "OK");
+            }
+            catch (Exception ex)
+            {
+                DisplayAlert("Error", $"Failed to resume clock: {ex.Message}", "OK");
+            }
+        }
+
+        private void OnResetClock(object sender, EventArgs e)
+        {
+            try
+            {
+                _viewModel.VirtualClock.Reset();
+                HourEntry.Text = "";
+                MinuteEntry.Text = "";
+                DisplayAlert("Clock Reset", "Virtual clock has been reset to 08:00 with 60x speed", "OK");
+            }
+            catch (Exception ex)
+            {
+                DisplayAlert("Error", $"Failed to reset clock: {ex.Message}", "OK");
+            }
+        }
+
 
     }
 }

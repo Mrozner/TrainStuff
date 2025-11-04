@@ -35,9 +35,13 @@ public class MainPageViewModel : INotifyPropertyChanged
         set { SetProperty(ref _selectedEndStation, value); }
     }
 
-    public MainPageViewModel(ApplicationDbContext dbContext)
+    // Virtual Clock ViewModel
+    public VirtualClockViewModel VirtualClock { get; private set; }
+
+    public MainPageViewModel(ApplicationDbContext dbContext, VirtualClock virtualClock)
     {
         _dbContext = dbContext;
+        VirtualClock = new VirtualClockViewModel(virtualClock);
     }
 
     public async Task LoadDataAsync()

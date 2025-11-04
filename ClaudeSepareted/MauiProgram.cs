@@ -84,6 +84,9 @@ public static class MauiProgram
         // Status notification service
         builder.Services.AddSingleton<StatusNotificationService>();
 
+        // Virtual clock service
+        builder.Services.AddSingleton<VirtualClock>();
+
         // 5. Regisztráljuk az AdminPanelPage-t is
         builder.Services.AddTransient<AdminPanelPage>();
 

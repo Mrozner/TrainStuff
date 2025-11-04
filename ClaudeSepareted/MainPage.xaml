@@ -87,37 +87,140 @@
         <Grid Grid.Column="1"
           BackgroundColor="#E0E0E0"
           Padding="10">
-            <VerticalStackLayout Spacing="20"
-                             VerticalOptions="End"
-                             HorizontalOptions="Center">
-                <!-- Fejlesztői mód gomb -->
-                <Frame Padding="0"
-                   WidthRequest="60"
-                   HeightRequest="60"
-                   CornerRadius="30"
-                   BackgroundColor="#2196F3"
-                   HasShadow="True">
-                    <Button Text="🛠️"
-                        FontSize="24"
-                        BackgroundColor="Transparent"
-                        TextColor="White"
-                        Clicked="AdminPanel"/>
-                </Frame>
+            <ScrollView VerticalOptions="Fill">
+                <VerticalStackLayout Spacing="15"
+                                 HorizontalOptions="Center">
 
-                <!-- Hozzáad gomb -->
-                <Frame Padding="0"
-                   WidthRequest="60"
-                   HeightRequest="60"
-                   CornerRadius="30"
-                   BackgroundColor="#FF9800"
-                   HasShadow="True">
-                    <Button Text="➕"
-                        FontSize="24"
-                        BackgroundColor="Transparent"
-                        TextColor="White"
-                        Clicked="OnAddClicked"/>
-                </Frame>
-            </VerticalStackLayout>
+                    <!-- Virtual Clock Section -->
+                    <Frame BackgroundColor="White"
+                           CornerRadius="10"
+                           Padding="15"
+                           HasShadow="True">
+                        <VerticalStackLayout Spacing="10">
+                            <Label Text="⏰ Virtual Clock"
+                                   FontSize="16"
+                                   FontAttributes="Bold"
+                                   HorizontalOptions="Center" />
+
+                            <Label Text="{Binding VirtualClock.CurrentTimeString}"
+                                   FontSize="20"
+                                   FontAttributes="Bold"
+                                   HorizontalOptions="Center"
+                                   TextColor="#2196F3" />
+
+                            <Label Text="{Binding VirtualClock.SpeedDisplay}"
+                                   FontSize="14"
+                                   HorizontalOptions="Center"
+                                   TextColor="#666" />
+                        </VerticalStackLayout>
+                    </Frame>
+
+                    <!-- Time Controls -->
+                    <Frame BackgroundColor="White"
+                           CornerRadius="10"
+                           Padding="15"
+                           HasShadow="True">
+                        <VerticalStackLayout Spacing="10">
+                            <Label Text="Set Time"
+                                   FontSize="14"
+                                   FontAttributes="Bold"
+                                   HorizontalOptions="Center" />
+
+                            <Grid ColumnDefinitions="*,*,*" ColumnSpacing="5">
+                                <Entry Grid.Column="0"
+                                       x:Name="HourEntry"
+                                       Placeholder="HH"
+                                       Keyboard="Numeric"
+                                       HorizontalTextAlignment="Center" />
+                                <Label Grid.Column="1"
+                                       Text=":"
+                                       HorizontalOptions="Center"
+                                       VerticalOptions="Center"
+                                       FontSize="18" />
+                                <Entry Grid.Column="2"
+                                       x:Name="MinuteEntry"
+                                       Placeholder="MM"
+                                       Keyboard="Numeric"
+                                       HorizontalTextAlignment="Center" />
+                            </Grid>
+
+                            <Button Text="Set Time"
+                                    Clicked="OnSetVirtualTime"
+                                    BackgroundColor="#4CAF50"
+                                    TextColor="White" />
+                        </VerticalStackLayout>
+                    </Frame>
+
+                    <!-- Speed Controls -->
+                    <Frame BackgroundColor="White"
+                           CornerRadius="10"
+                           Padding="15"
+                           HasShadow="True">
+                        <VerticalStackLayout Spacing="10">
+                            <Label Text="Speed Control"
+                                   FontSize="14"
+                                   FontAttributes="Bold"
+                                   HorizontalOptions="Center" />
+
+                            <Picker x:Name="SpeedPicker"
+                                    SelectedItem="{Binding VirtualClock.SelectedSpeedOption}"
+                                    ItemsSource="{Binding VirtualClock.SpeedOptions}" />
+
+                            <Grid ColumnDefinitions="*,*" ColumnSpacing="5">
+                                <Button Grid.Column="0"
+                                        Text="⏸️"
+                                        Clicked="OnPauseClock"
+                                        BackgroundColor="#FF9800"
+                                        TextColor="White" />
+                                <Button Grid.Column="1"
+                                        Text="▶️"
+                                        Clicked="OnResumeClock"
+                                        BackgroundColor="#4CAF50"
+                                        TextColor="White" />
+                            </Grid>
+
+                            <Button Text="🔄 Reset"
+                                    Clicked="OnResetClock"
+                                    BackgroundColor="#9E9E9E"
+                                    TextColor="White" />
+                        </VerticalStackLayout>
+                    </Frame>
+
+                    <!-- Action Buttons -->
+                    <VerticalStackLayout Spacing="20"
+                                     VerticalOptions="End"
+                                     HorizontalOptions="Center">
+                        <!-- Fejlesztői mód gomb -->
+                        <Frame Padding="0"
+                           WidthRequest="60"
+                           HeightRequest="60"
+                           CornerRadius="30"
+                           BackgroundColor="#2196F3"
+                           HasShadow="True">
+                            <Button Text="🛠️"
+                                FontSize="24"
+                                BackgroundColor="Transparent"
+                                TextColor="White"
+                                Clicked="AdminPanel"/>
+                        </Frame>
+
+                        <!-- Hozzáad gomb -->
+                        <Frame Padding="0"
+                           WidthRequest="60"
+                           HeightRequest="60"
+                           CornerRadius="30"
+                           BackgroundColor="#FF9800"
+                           HasShadow="True">
+                            <Button Text="➕"
+                                FontSize="24"
+                                BackgroundColor="Transparent"
+                                TextColor="White"
+                                Clicked="OnAddClicked"/>
+                        </Frame>
+                    </VerticalStackLayout>
+
+                </VerticalStackLayout>
+            </ScrollView>
         </Grid>
     </Grid>
 
