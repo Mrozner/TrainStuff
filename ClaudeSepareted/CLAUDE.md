@@ -4,17 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a .NET MAUI train control system that manages model train operations via MQTT communication and a SQL Server database. The application provides both a mobile interface and administrative console for managing train timetables, track layouts, and real-time train operations.
+This is a .NET MAUI train control system application that manages train operations, track infrastructure, and scheduling through MQTT communication and a SQL Server database. The system controls model trains, monitors track sensors, and manages timetables with a virtual clock system.
 
-## Build and Development Commands
+## Development Commands
 
 ### Building the Application
 ```bash
-# Build for all platforms
-dotnet build
+# Build the entire solution
+dotnet build ClaudeSepareted.sln
 
-# Build for specific configuration
-dotnet build -c Release
+# Build specific project
+dotnet build ClaudeSepareted.csproj
 
 # Build for specific platform
 dotnet build -f net8.0-windows10.0.19041.0
@@ -22,91 +22,140 @@ dotnet build -f net8.0-windows10.0.19041.0
 
 ### Running the Application
 ```bash
-# Run on Windows
-dotnet run -f net8.0-windows10.0.19041.0
+# Run on Windows (requires Visual Studio or Windows SDK)
+dotnet run
 
-# Run on Android (requires Android emulator/device)
-dotnet run -f net8.0-android
-
-# Run on iOS/MacCatalyst (requires appropriate environment)
-dotnet run -f net8.0-maccatalyst
+# Run with specific configuration
+dotnet run -c Release
 ```
 
 ### Database Operations
 ```bash
-# Add database migration
+# Add new migration
 dotnet ef migrations add MigrationName
 
 # Update database
 dotnet ef database update
+
+# List migrations
+dotnet ef migrations list
+```
+
+### Package Management
+```bash
+# Restore packages
+dotnet restore
+
+# Add new package
+dotnet add package PackageName
 ```
 
 ## Architecture Overview
 
 ### Core Components
 
-**Domain Layer** (`Domain/`):
-- `Train.cs` - Train entity with state management
-- `TrackLayout.cs` - Track sections, subsections, platforms, switches
-- `Stations.cs` - Station management
-- `Timetable.cs` - Train schedule entries
-- `Enums.cs` - System enums (Speed, TrainState, EntryState, etc.)
+**Database Layer:**
+- `ApplicationDbContext` - Entity Framework Core context with SQL Server
+- Key entities: `Train`, `Sections`, `SubSections`, `Platforms`, `Signals`, `TimetableEntries`
+- Connection string configured in both `MauiProgram.cs` and `appsettings.json`
 
-**Services** (`Services/`):
-- `TrackManager.cs` - Core track operations, route planning, train movement
-- `TrainManagerService.cs` - Train speed control and emergency operations
-- `TimetableManager.cs` - Schedule processing and train automation
+**Service Layer:**
+- `TrackManager` - Central track management, route planning (BFS), train positioning
+- `TrainManagerService` - Train speed control with individual `TrainController` instances
+- `TimetableManager` - Schedule processing with thread-safe operations
+- `TimetableRepository` - Thread-safe database access using `IServiceScopeFactory`
 
-**Messaging** (`Messaging/`):
-- `MQTTMessageHandler.cs` - Central message routing and processing
-- `TrainMQTTConnector.cs` - Train-specific MQTT communications
-- `TrackMQTTConnector.cs` - Track signal and state communications
-- `TimetableMQTTConnector.cs` - Schedule management communications
+**MQTT Integration:**
+- `TrackMQTTConnector` - Track sensor data (hall sensors, RFID) and control commands
+- `TrainMQTTConnector` - Train speed commands and signal status updates
+- `TimetableMQTTConnector` - Timetable request/response handling
+- `MQTTMessageHandler` - Centralized message routing to appropriate managers
+- `AdminMQTTService` - Administrative speed control commands
 
-**Data Access** (`DataAccess/`):
-- `ApplicationDbContext.cs` - Entity Framework database context
-- `TimetableRepository.cs` - Timetable-specific data operations
+**Additional Services:**
+- `StatusNotificationService` - Status message broadcasting and logging
+- `VirtualClock` - Time acceleration system (60x speed default)
+- `SystemConfiguration` - Centralized configuration management
 
-**Configuration** (`Configuration/`):
-- `SystemConfiguration.cs` - Main system settings
-- `MQTTConfiguration.cs` - MQTT broker settings
-- `TrackConfiguration.cs` - Track layout settings
+### UI Layer (MVVM Pattern)
+- `MainPage` - Main interface with timetable management and virtual clock controls
+- `MainPageViewModel` - Data binding and business logic for main view
+- `AdminPanelPage` - Administrative interface for manual train control
+- Uses INotifyPropertyChanged and ObservableCollection for reactive UI
 
-### Key Patterns
+### Configuration System
 
-**Train Movement Flow**:
-1. Timetable entries trigger train starts via `TryStartTrain()`
-2. `TrackManager` plans routes using BFS algorithm
-3. `TrainManagerService` controls train speeds via MQTT
-4. Track sensors (Hall, RFID) update positions via MQTT messages
-5. Signals are automatically managed based on train positions
+**Dual Configuration Approach:**
+1. Hard-coded `SystemConfiguration` in `MauiProgram.cs` (primary)
+2. JSON configuration in `appsettings.json` (backup/external)
 
-**MQTT Topics** (from appsettings.json):
-- Track sensing: `rocrail/service/info/fb`, `track/info/hall`, `track/info/rfid`
-- Commands: `rocrail/service/client`, `track/command/signal`
-- Train operations: `train/signal/*`, `train/start/request`, `train/status`
+**MQTT Topics Structure:**
+- Track sensors: `rocrail/service/info/fb`, `track/info/hall`, `track/info/rfid`
+- Train control: `rocrail/service/client`, `train/signal/request/response/changed`
+- Timetable: `train/start/request`, `train/status`
 
-**Thread Safety**:
-- All track operations use `lock (_lockObject)` for thread safety
-- Route planning uses caching to improve performance
-- Database operations are properly synchronized
+### Key Domain Enumerations
+- `Speed`: STOP(0), SLOW(30), MEDIUM(60), HIGH(90)
+- `TrainState`: Waiting, Moving, Stopped, PrepareToStop
+- `EntryState`: Upcoming, InProgress, Arrived
+- `RouteState`: InTime, Delay
+- `Direction`: Forward, Backward
+- `ObjectType`: Signal, Hall, RFID
 
-## Database Configuration
+## Development Guidelines
 
-The application uses SQL Server with connection string configured in both `appsettings.json` and `MauiProgram.cs`. Default connection uses Windows Authentication with APPLOGIN user.
+### Database Connection
+The application uses SQL Server with this connection format:
+```
+Server=LAPTOP-ANHCTCLU\SQLEXPRESS;Database=TrainControllerSystem;TrustServerCertificate=True;Trusted_Connection=True;User Id=APPLOGIN;Password=12345
+```
 
-## Key Development Notes
+### MQTT Broker Configuration
+- Address: 172.22.2.2
+- Port: 1883
+- Quality of Service: AtLeastOnce
 
-- The system is designed for real-time train control, avoid blocking operations in MQTT handlers
-- Route planning uses simplified topology - in production, this would use actual track geometry
-- All train movements must be validated through `CheckIfCanMove()` before execution
-- Signal states are automatically managed based on train positions and movement
-- The system supports both automatic timetable-based operation and manual control
+### Thread Safety
+- All manager services use lock objects for thread safety
+- Repository uses `IServiceScopeFactory` for proper DbContext lifetime
+- MQTT operations run on background threads with UI synchronization
 
-## Testing
+### Virtual Clock System
+- Default speed: 60x real-time
+- Default start time: 08:00
+- Controls train scheduling and timetable processing
 
-Manual testing can be done through the console interface using `ConsoleInterface.cs` which provides commands for:
-- Starting trains manually: `ManualStartTrain(trainId, destinationStationId)`
-- Debugging routes: `DebugRoute(startSubSectionId, endSubSectionId)`
-- Viewing track layout: `DebugTrackLayout()`
-- Listing trains and their current states
+### Error Handling
+- Comprehensive exception handling throughout the service layer
+- Status notification system for real-time feedback
+- UI displays user-friendly error messages
+
+## Common Development Tasks
+
+### Adding New MQTT Topics
+1. Update `MQTTConfiguration` class with new topic properties
+2. Modify appropriate MQTT connector to handle the new topics
+3. Update `SystemConfiguration` in `MauiProgram.cs`
+4. Add topic definitions to `appsettings.json`
+
+### Adding New Train Operations
+1. Extend `TrainManagerService` with new methods
+2. Update `TrainController` if needed
+3. Add corresponding MQTT commands in `TrainMQTTConnector`
+4. Update UI models and ViewModels accordingly
+
+### Database Schema Changes
+1. Modify entity classes in the Models folder
+2. Create and apply Entity Framework migrations
+3. Update `ApplicationDbContext` if adding new DbSets
+4. Test migration on development database first
+
+### Testing MQTT Communication
+Use the admin panel to manually send train speed commands and monitor status messages in real-time. The status bar shows all MQTT communications with timestamps.
+
+## Project Structure
+- `MauiProgram.cs` - Dependency injection setup and configuration
+- `MainPage.xaml/cs` - Main application interface
+- `AdminPanelPage.xaml/cs` - Administrative control interface
+- `appsettings.json` - External configuration file
+- `ClaudeSepareted.csproj` - Project configuration and NuGet packages

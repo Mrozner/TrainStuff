@@ -16,7 +16,7 @@ namespace ClaudeSepareted
 
         public VirtualClock()
         {
-            _virtualTime = new DateTime(2024, 1, 1, 8, 0, 0); // Default 8:00 AM
+            _virtualTime = new DateTime(2024, 1, 1, 0, 0, 0); // Default 0:00 (midnight)
             _startTime = DateTime.Now;
             _speedMultiplier = 60.0; // Default 60x speed
 
@@ -29,13 +29,13 @@ namespace ClaudeSepareted
             var elapsedRealTime = DateTime.Now - _startTime;
             var elapsedVirtualTime = TimeSpan.FromTicks((long)(elapsedRealTime.Ticks * _speedMultiplier));
 
-            var newVirtualTime = new DateTime(2024, 1, 1, 8, 0, 0).Add(elapsedVirtualTime);
+            var newVirtualTime = new DateTime(2024, 1, 1, 0, 0, 0).Add(elapsedVirtualTime);
 
             if (newVirtualTime.Date != _virtualTime.Date)
             {
                 // Reset to same day if we've passed midnight
                 _startTime = DateTime.Now;
-                newVirtualTime = new DateTime(2024, 1, 1, 8, 0, 0);
+                newVirtualTime = new DateTime(2024, 1, 1, 0, 0, 0);
             }
 
             _virtualTime = newVirtualTime;
@@ -58,12 +58,14 @@ namespace ClaudeSepareted
         public void SetTime(DateTime newTime)
         {
             _virtualTime = new DateTime(2024, 1, 1, newTime.Hour, newTime.Minute, newTime.Second);
-            _startTime = DateTime.Now;
+            // Adjust start time so the timer calculates to the desired time
+            var targetTimeOfDay = newTime.TimeOfDay;
+            _startTime = DateTime.Now - TimeSpan.FromTicks((long)(targetTimeOfDay.Ticks / _speedMultiplier));
         }
 
         public void Reset()
         {
-            SetTime(new DateTime(2024, 1, 1, 8, 0, 0));
+            SetTime(new DateTime(2024, 1, 1, 0, 0, 0));
             SetSpeed(60.0);
         }
 

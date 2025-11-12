@@ -37,7 +37,7 @@ namespace ClaudeSepareted
                 await DisplayAlert("Hiba", "Kérjük, válasszon vonatot, indulási helyet és célállomást.", "OK");
                 return;
             }
-            var startTime = StartTimePicker.Time;
+            var startTime = StartTimePicker.Time ?? TimeSpan.Zero;
 
             using (_dbContext)
             {
