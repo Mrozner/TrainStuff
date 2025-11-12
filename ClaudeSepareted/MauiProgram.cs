@@ -67,16 +67,7 @@ public static class MauiProgram
         builder.Services.AddSingleton(systemConfig.Track);
         builder.Services.AddSingleton(systemConfig.Timetable);
 
-        builder.Services.AddSingleton<TrainMQTTConnector>();
-        builder.Services.AddSingleton<TrackMQTTConnector>();
-        builder.Services.AddSingleton<TimetableMQTTConnector>();
-
-        builder.Services.AddSingleton<TrackManager>();
-        builder.Services.AddSingleton<TrainManagerService>();
-        builder.Services.AddSingleton<TimetableManager>();
         builder.Services.AddSingleton<TimetableRepository>();
-
-        builder.Services.AddSingleton<MQTTMessageHandler>();
 
         // Admin MQTT service for speed control
         builder.Services.AddSingleton<AdminMQTTService>();
