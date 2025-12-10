@@ -1,4 +1,4 @@
-namespace ClaudeSepareted
+namespace ClaudeSepareted.Domain
 {
     public enum Direction
     {

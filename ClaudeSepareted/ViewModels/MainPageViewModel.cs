@@ -10,8 +10,11 @@ public class MainPageViewModel : INotifyPropertyChanged
 
     // 1. Observable Properties (Listák)
     public ObservableCollection<Train> Trains { get; set; } = new ObservableCollection<Train>();
-    public ObservableCollection<Stations> Stations { get; set; } = new ObservableCollection<Stations>();
+    public ObservableCollection<Platforms> Platforms { get; set; } = new ObservableCollection<Platforms>();
     public ObservableCollection<ScheduleItem> ScheduleItems { get; set; } = new ObservableCollection<ScheduleItem>();
+
+    // Helper property for platform display in pickers
+    public ObservableCollection<PlatformDisplayItem> PlatformDisplayItems { get; set; } = new ObservableCollection<PlatformDisplayItem>();
 
     // 2. Observable Properties (Kiválasztott elemek)
     private Train _selectedTrain;
@@ -21,18 +24,18 @@ public class MainPageViewModel : INotifyPropertyChanged
         set { SetProperty(ref _selectedTrain, value); }
     }
 
-    private Stations _selectedStartStation;
-    public Stations SelectedStartStation
+    private PlatformDisplayItem _selectedStartPlatform;
+    public PlatformDisplayItem SelectedStartPlatform
     {
-        get => _selectedStartStation;
-        set { SetProperty(ref _selectedStartStation, value); }
+        get => _selectedStartPlatform;
+        set { SetProperty(ref _selectedStartPlatform, value); }
     }
 
-    private Stations _selectedEndStation;
-    public Stations SelectedEndStation
+    private PlatformDisplayItem _selectedEndPlatform;
+    public PlatformDisplayItem SelectedEndPlatform
     {
-        get => _selectedEndStation;
-        set { SetProperty(ref _selectedEndStation, value); }
+        get => _selectedEndPlatform;
+        set { SetProperty(ref _selectedEndPlatform, value); }
     }
 
     // Virtual Clock ViewModel
@@ -70,22 +73,31 @@ public class MainPageViewModel : INotifyPropertyChanged
                 }
             });
 
-            // Állomások betöltése
-            var stations = await _dbContext.Stations
-                .Where(s => s.IsActive)
-                .OrderBy(s => s.Name)
+            // Peronok betöltése
+            var platforms = await _dbContext.Platforms
+                .Include(p => p.Station)
+                .Where(p => p.IsActive)
+                .OrderBy(p => p.Station.Name)
+                    .ThenBy(p => p.Name)
                 .ToListAsync();
 
             MainThread.BeginInvokeOnMainThread(() =>
             {
-                Stations.Clear();
-                foreach (var station in stations)
+                Platforms.Clear();
+                PlatformDisplayItems.Clear();
+                foreach (var platform in platforms)
                 {
-                    Stations.Add(station);
+                    Platforms.Add(platform);
+                    PlatformDisplayItems.Add(new PlatformDisplayItem(platform));
                 }
             });
 
             var entries = await _dbContext.TimetableEntries
+                .Include(e => e.Train)
+                .Include(e => e.SourcePlatform)
+                    .ThenInclude(sp => sp.Station)
+                .Include(e => e.DestinationPlatform)
+                    .ThenInclude(dp => dp.Station)
                 .ToListAsync();
             foreach (var entry in entries.OrderBy(e => e.StartTime))
             {
@@ -95,18 +107,21 @@ public class MainPageViewModel : INotifyPropertyChanged
                     : entry.StartTime.Add(new TimeSpan(2, 0, 0));
                 ScheduleItems.Add(new ScheduleItem
                 {
-                    // A navigációs tulajdonságokat (Train, SourceStation, DestinationStation) használjuk.
+                    // A navigációs tulajdonságokat (Train, SourcePlatform, DestinationPlatform) használjuk.
                     TrainName = entry.Train?.Name ?? "Vonat neve hiányzik",
                     Start = entry.StartTime,
                     End = endTime,
-                    From = entry.SourceStation?.Name ?? "Kiinduló állomás hiányzik",
-                    To = entry.DestinationStation?.Name ?? "Célállomás hiányzik"
+                    From = entry.SourcePlatform?.Station?.Name ?? "Kiinduló állomás hiányzik",
+                    To = entry.DestinationPlatform?.Station?.Name ?? "Célállomás hiányzik",
+                    // Add platform-specific information for precise deletion
+                    FromPlatform = entry.SourcePlatform?.Name ?? "Platform hiányzik",
+                    ToPlatform = entry.DestinationPlatform?.Name ?? "Platform hiányzik"
                 });
             }
 
 
 
-            Console.WriteLine($"Adatok betöltve: {Trains.Count} vonat, {Stations.Count} állomás.");
+            Console.WriteLine($"Adatok betöltve: {Trains.Count} vonat, {Platforms.Count} peron.");
         }
         catch (Exception ex)
         {
@@ -133,5 +148,18 @@ public class MainPageViewModel : INotifyPropertyChanged
         backingStore = value;
         OnPropertyChanged(propertyName);
         return true;
+    }
+}
+
+// Helper class for displaying platforms in pickers
+public class PlatformDisplayItem
+{
+    public Platforms Platform { get; set; }
+    public string DisplayName { get; set; }
+
+    public PlatformDisplayItem(Platforms platform)
+    {
+        Platform = platform;
+        DisplayName = $"{platform.Station?.Name ?? "Unknown"} - {platform.Name}";
     }
 }

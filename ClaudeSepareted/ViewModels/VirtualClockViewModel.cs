@@ -20,7 +20,7 @@ namespace ClaudeSepareted
             {
                 if (SetProperty(ref _currentTime, value))
                 {
-                    CurrentTimeString = value.ToString("HH:mm:ss");
+                    CurrentTimeString = value.ToString("HH:mm");
                     OnPropertyChanged(nameof(TimeDisplay));
                 }
             }
@@ -83,17 +83,20 @@ namespace ClaudeSepareted
             {
                 _currentTime = virtualClock.CurrentTime;
                 _speedMultiplier = virtualClock.SpeedMultiplier;
-                _currentTimeString = _currentTime.ToString("HH:mm:ss");
+                _currentTimeString = _currentTime.ToString("HH:mm");
                 _speedDisplay = $"{_speedMultiplier:F1}x";
                 _selectedSpeedOption = "60x";
 
                 virtualClock.TimeChanged += OnVirtualTimeChanged;
+
+                // Start the virtual clock if it hasn't been started yet
+                virtualClock.Start();
             }
             else
             {
-                _currentTime = new DateTime(2024, 1, 1, 8, 0, 0);
+                _currentTime = new DateTime(2024, 1, 1, 0, 0, 0); // Midnight
                 _speedMultiplier = 60.0;
-                _currentTimeString = _currentTime.ToString("HH:mm:ss");
+                _currentTimeString = _currentTime.ToString("HH:mm");
                 _speedDisplay = "60.0x";
                 _selectedSpeedOption = "60x";
             }
@@ -142,7 +145,7 @@ namespace ClaudeSepareted
         public void Reset()
         {
             _virtualClock?.Reset();
-            CurrentTime = _virtualClock?.CurrentTime ?? new DateTime(2024, 1, 1, 8, 0, 0);
+            CurrentTime = _virtualClock?.CurrentTime ?? new DateTime(2024, 1, 1, 0, 0, 0); // Midnight
             SpeedMultiplier = _virtualClock?.SpeedMultiplier ?? 60.0;
             SpeedDisplay = "60.0x";
             SelectedSpeedOption = "60x";

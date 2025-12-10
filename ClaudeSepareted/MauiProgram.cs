@@ -2,6 +2,8 @@
 
 using Microsoft.EntityFrameworkCore;
 using ClaudeSepareted;
+using ClaudeSepareted.Services;
+using ClaudeSepareted.DataAccess;
 
 public static class MauiProgram
 {
@@ -34,6 +36,7 @@ public static class MauiProgram
                 TrackRFIDTopic = "track/info/rfid",
                 TrackCommandTopic = "rocrail/service/client",
                 TrackSignalTopic = "track/command/signal",
+                SwitchCommandTopic = "rocrail/service/client",
                 TrainSignalRequestTopic = "train/signal/request",
                 TrainSignalResponseTopic = "train/signal/response",
                 TrainSignalChangedTopic = "train/signal/changed",
@@ -67,16 +70,7 @@ public static class MauiProgram
         builder.Services.AddSingleton(systemConfig.Track);
         builder.Services.AddSingleton(systemConfig.Timetable);
 
-        builder.Services.AddSingleton<TrainMQTTConnector>();
-        builder.Services.AddSingleton<TrackMQTTConnector>();
-        builder.Services.AddSingleton<TimetableMQTTConnector>();
-
-        builder.Services.AddSingleton<TrackManager>();
-        builder.Services.AddSingleton<TrainManagerService>();
-        builder.Services.AddSingleton<TimetableManager>();
-        builder.Services.AddSingleton<TimetableRepository>();
-
-        builder.Services.AddSingleton<MQTTMessageHandler>();
+        builder.Services.AddSingleton<ITimetableRepository, TimetableRepository>();
 
         // Admin MQTT service for speed control
         builder.Services.AddSingleton<AdminMQTTService>();
@@ -86,6 +80,19 @@ public static class MauiProgram
 
         // Virtual clock service
         builder.Services.AddSingleton<VirtualClock>();
+
+        // Admin MQTT service for speed control
+        builder.Services.AddSingleton<AdminMQTTService>();
+
+        // Route Planner Service for BFS route planning and switch control
+        builder.Services.AddSingleton<RoutePlannerService>();
+
+        
+        // Train Pathfinder Integration Service for demonstrating pathfinding usage
+        builder.Services.AddSingleton<TrainPathfinderIntegration>();
+
+        // Track Handler Service for automated train scheduling
+        builder.Services.AddSingleton<TrackHandlerService>();
 
         // 5. Regisztráljuk az AdminPanelPage-t is
         builder.Services.AddTransient<AdminPanelPage>();

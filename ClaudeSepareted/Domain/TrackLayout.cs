@@ -29,10 +29,17 @@ namespace ClaudeSepareted
         public int DB_ID { get; set; }
         public string Name { get; set; }
         public int SubSection_DB_ID { get; set; }
-        [NotMapped]
-        public SubSections SubSection { get; set; }
         public int Station_DB_ID { get; set; }
-        public bool isActive { get; set; }
+        public int? EndOfPlatformDir0 { get; set; }
+        public int? EndOfPlatformDir1 { get; set; }
+        public bool IsActive { get; set; }
+
+        // Navigation properties
+        [ForeignKey(nameof(SubSection_DB_ID))]
+        public SubSections SubSection { get; set; }
+
+        [ForeignKey(nameof(Station_DB_ID))]
+        public Stations Station { get; set; }
     }
 
     public class Switches

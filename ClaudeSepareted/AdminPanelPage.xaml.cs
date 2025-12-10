@@ -1,4 +1,6 @@
-﻿using Microsoft.EntityFrameworkCore;
+﻿using ClaudeSepareted.Domain;
+using ClaudeSepareted.Services;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Maui.Controls;
 using System;
 using System.Collections.Generic;
@@ -216,6 +218,22 @@ namespace ClaudeSepareted
                 // Re-enable button
                 ((Button)sender).IsEnabled = true;
             }
+        }
+
+        // Route planner functionality has been removed
+
+        private void AddStatusMessage(string message)
+        {
+            // Log to console for now since StatusContainer UI element doesn't exist
+            Console.WriteLine($"[AdminPanel] [{DateTime.Now:HH:mm:ss}] {message}");
+
+            // Also show as status notification
+            if (message.Contains("✅"))
+                _statusService.ShowSuccess(message);
+            else if (message.Contains("❌"))
+                _statusService.ShowError(message);
+            else
+                _statusService.ShowInfo(message);
         }
 
     }

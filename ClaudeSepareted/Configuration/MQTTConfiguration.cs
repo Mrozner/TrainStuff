@@ -11,6 +11,7 @@ namespace ClaudeSepareted {
         public string TrackRFIDTopic { get; set; } = "track/info/rfid";
         public string TrackCommandTopic { get; set; } = "rocrail/service/client";
         public string TrackSignalTopic { get; set; } = "track/command/signal";
+        public string SwitchCommandTopic { get; set; } = "rocrail/service/client";
 
         // Train Topics
         public string TrainSignalRequestTopic { get; set; } = "train/signal/request";

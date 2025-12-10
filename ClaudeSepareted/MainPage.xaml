@@ -20,27 +20,27 @@
                         ItemsSource="{Binding Trains}">
                 </Picker>
 
-                <!-- Kiinduló állomás -->
-                <Picker x:Name="StartPicker" 
-                        Title="Válassz indulási helyet"
-                        ItemDisplayBinding="{Binding Name}"
-                        SelectedItem="{Binding SelectedStartStation}"
-                        ItemsSource="{Binding Stations}">
+                <!-- Kiinduló állomás/peron -->
+                <Picker x:Name="StartPicker"
+                        Title="Válassz indulási peront"
+                        ItemDisplayBinding="{Binding DisplayName}"
+                        SelectedItem="{Binding SelectedStartPlatform}"
+                        ItemsSource="{Binding PlatformDisplayItems}">
                 </Picker>
 
-                <!-- Végállomás -->
-                <Picker x:Name="EndPicker" 
-                        Title="Válassz célállomást"
-                        ItemDisplayBinding="{Binding Name}"
-                        SelectedItem="{Binding SelectedEndStation}"
-                        ItemsSource="{Binding Stations}">
+                <!-- Végállomás/peron -->
+                <Picker x:Name="EndPicker"
+                        Title="Válassz célperont"
+                        ItemDisplayBinding="{Binding DisplayName}"
+                        SelectedItem="{Binding SelectedEndPlatform}"
+                        ItemsSource="{Binding PlatformDisplayItems}">
                 </Picker>
 
                 <!-- Idők egymás mellett -->
                 <Grid ColumnDefinitions="*,*">
                     <VerticalStackLayout Grid.Column="0" Spacing="5">
                         <Label Text="Indulási idő:" FontSize="16" />
-                        <TimePicker x:Name="StartTimePicker" Time="08:00:00" Format="HH:mm" />
+                        <TimePicker x:Name="StartTimePicker" Time="00:00:00" Format="HH:mm" />
                     </VerticalStackLayout>
                 </Grid>
 

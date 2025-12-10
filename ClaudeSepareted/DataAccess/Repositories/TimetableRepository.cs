@@ -1,9 +1,10 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using ClaudeSepareted.Domain;
 
-namespace ClaudeSepareted
+namespace ClaudeSepareted.DataAccess
 {
-    public class TimetableRepository
+    public class TimetableRepository : ITimetableRepository
     {
         private readonly IServiceScopeFactory _scopeFactory;
         private readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);

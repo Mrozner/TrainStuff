@@ -1,3 +1,4 @@
+using ClaudeSepareted.Domain;
 using MQTTnet;
 using System.Text;
 
@@ -293,6 +294,57 @@ namespace ClaudeSepareted
             {
                 _statusService?.ShowError($"Hiba: {ex.Message}", trainName);
                 Console.WriteLine($"Error sending power-off command: {ex.Message}");
+                return false;
+            }
+        }
+
+        public async Task<bool> SendSwitchCommandAsync(string switchName, string position)
+        {
+            if (!_isInitialized)
+            {
+                var connected = await InitializeAsync();
+                if (!connected)
+                {
+                    Console.WriteLine("MQTT not connected for switch command");
+                    return false;
+                }
+            }
+
+            try
+            {
+                if (_mqttClient == null || !_mqttClient.IsConnected)
+                {
+                    Console.WriteLine("MQTT client not connected for switch command");
+                    return false;
+                }
+
+                // Rocrail switch command format: <sw id="SwitchName" cmd="straight/turnout"/>
+                var rocrailCommand = $"<sw id=\"{switchName}\" cmd=\"{position}\"/>";
+
+                Console.WriteLine($"[AdminMQTT] Sending switch command: {rocrailCommand}");
+
+                var mqttMessage = new MqttApplicationMessageBuilder()
+                    .WithTopic(_config.TrainSpeedCommandTopic)
+                    .WithPayload(Encoding.UTF8.GetBytes(rocrailCommand))
+                    .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce)
+                    .Build();
+
+                var result = await _mqttClient.PublishAsync(mqttMessage);
+
+                if (result.IsSuccess)
+                {
+                    Console.WriteLine($"[AdminMQTT] Switch command sent successfully: {switchName} -> {position}");
+                    return true;
+                }
+                else
+                {
+                    Console.WriteLine($"[AdminMQTT] Failed to send switch command: {switchName} -> {position}");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[AdminMQTT] Error sending switch command: {ex.Message}");
                 return false;
             }
         }
