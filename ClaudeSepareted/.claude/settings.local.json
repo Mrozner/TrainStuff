@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dotnet build:*)",
+      "Bash(rm:*)",
+      "Bash(dotnet:*)",
+      "WebSearch",
+      "Bash(move:*)",
+      "Bash(timeout:*)",
+      "Bash(csc:*)",
+      "Bash(rd:*)",
+      "Bash(findstr:*)",
+      "Bash(dir:*)",
+      "Bash(sqlcmd:*)",
+      "Bash(dotnet-ef migrations add:*)",
+      "Bash(ls:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
