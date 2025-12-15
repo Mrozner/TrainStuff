@@ -31,11 +31,11 @@ namespace ClaudeSepareted.Domain
         public int? NextSection_DB_ID { get; set; }
 
         /// <summary>
-        /// Direction of travel (0 or 1)
+        /// Direction of travel (true/false)
         /// </summary>
         [Required]
         [Column("Direction")]
-        public int Direction { get; set; }
+        public bool Direction { get; set; }
 
         /// <summary>
         /// Aggregated destination platforms for this route
@@ -52,15 +52,15 @@ namespace ClaudeSepareted.Domain
         [Column("SwitchConstraints")]
         public string SwitchConstraints { get; set; } = string.Empty;
 
-        // Navigation properties (if needed)
-        /// <summary>
-        /// Navigation to the current section
-        /// </summary>
-        public virtual Sections? Section { get; set; }
+        //// Navigation properties (if needed)
+        ///// <summary>
+        ///// Navigation to the current section
+        ///// </summary>
+        //public virtual Sections? Section { get; set; }
 
-        /// <summary>
-        /// Navigation to the next section
-        /// </summary>
-        public virtual Sections? NextSection { get; set; }
+        ///// <summary>
+        ///// Navigation to the next section
+        ///// </summary>
+        //public virtual Sections? NextSection { get; set; }
     }
 }

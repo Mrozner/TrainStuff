@@ -300,12 +300,14 @@ namespace ClaudeSepareted
 
         public async Task<bool> SendSwitchCommandAsync(string switchName, string position)
         {
+            _statusService?.ShowInfo($"Attempting switch command: {switchName} -> {position}");
+
             if (!_isInitialized)
             {
                 var connected = await InitializeAsync();
                 if (!connected)
                 {
-                    Console.WriteLine("MQTT not connected for switch command");
+                    _statusService?.ShowError("MQTT not connected for switch command");
                     return false;
                 }
             }
@@ -314,17 +316,17 @@ namespace ClaudeSepareted
             {
                 if (_mqttClient == null || !_mqttClient.IsConnected)
                 {
-                    Console.WriteLine("MQTT client not connected for switch command");
+                    _statusService?.ShowError("MQTT client not connected for switch command");
                     return false;
                 }
 
                 // Rocrail switch command format: <sw id="SwitchName" cmd="straight/turnout"/>
                 var rocrailCommand = $"<sw id=\"{switchName}\" cmd=\"{position}\"/>";
 
-                Console.WriteLine($"[AdminMQTT] Sending switch command: {rocrailCommand}");
+                _statusService?.ShowInfo($"Sending MQTT: {rocrailCommand} to topic: {_config.TrackCommandTopic}");
 
                 var mqttMessage = new MqttApplicationMessageBuilder()
-                    .WithTopic(_config.TrainSpeedCommandTopic)
+                    .WithTopic(_config.TrackCommandTopic)
                     .WithPayload(Encoding.UTF8.GetBytes(rocrailCommand))
                     .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce)
                     .Build();
@@ -333,18 +335,18 @@ namespace ClaudeSepareted
 
                 if (result.IsSuccess)
                 {
-                    Console.WriteLine($"[AdminMQTT] Switch command sent successfully: {switchName} -> {position}");
+                    _statusService?.ShowSuccess($"Switch command sent: {switchName} -> {position}");
                     return true;
                 }
                 else
                 {
-                    Console.WriteLine($"[AdminMQTT] Failed to send switch command: {switchName} -> {position}");
+                    _statusService?.ShowError($"Failed to send switch: {switchName} -> {position}. Reason: {result.ReasonString}");
                     return false;
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[AdminMQTT] Error sending switch command: {ex.Message}");
+                _statusService?.ShowError($"Switch command error: {ex.Message}");
                 return false;
             }
         }

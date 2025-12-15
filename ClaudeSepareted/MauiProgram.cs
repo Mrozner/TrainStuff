@@ -84,12 +84,11 @@ public static class MauiProgram
         // Admin MQTT service for speed control
         builder.Services.AddSingleton<AdminMQTTService>();
 
-        // Route Planner Service for BFS route planning and switch control
-        builder.Services.AddSingleton<RoutePlannerService>();
+        // Unified Pathfinding Service - consolidates all pathfinding functionality
+        builder.Services.AddSingleton<UnifiedPathfindingService>();
 
-        
-        // Train Pathfinder Integration Service for demonstrating pathfinding usage
-        builder.Services.AddSingleton<TrainPathfinderIntegration>();
+        // Track Graph Factory for advanced pathfinding
+        builder.Services.AddSingleton<ITrackGraphFactory, TrackGraphFactory>();
 
         // Track Handler Service for automated train scheduling
         builder.Services.AddSingleton<TrackHandlerService>();

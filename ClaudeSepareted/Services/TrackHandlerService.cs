@@ -16,7 +16,7 @@ namespace ClaudeSepareted.Services
         private readonly MQTTConfiguration _mqttConfig;
         private readonly StatusNotificationService _statusService;
         private readonly IServiceProvider _serviceProvider;
-        private readonly RoutePlannerService _routePlanner;
+        private readonly UnifiedPathfindingService _unifiedPathfinder;
         private readonly CancellationTokenSource _cancellationTokenSource;
         private readonly List<TrainManagerService> _activeTrainManagers;
         private readonly Dictionary<string, DateTime> _recentlyProcessedTrains = new Dictionary<string, DateTime>();
@@ -34,14 +34,14 @@ namespace ClaudeSepareted.Services
             MQTTConfiguration mqttConfig,
             StatusNotificationService statusService,
             IServiceProvider serviceProvider,
-            RoutePlannerService routePlanner)
+            UnifiedPathfindingService unifiedPathfinder)
         {
             _virtualClock = virtualClock ?? throw new ArgumentNullException(nameof(virtualClock));
             _dbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
             _mqttConfig = mqttConfig ?? throw new ArgumentNullException(nameof(mqttConfig));
             _statusService = statusService ?? throw new ArgumentNullException(nameof(statusService));
             _serviceProvider = serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
-            _routePlanner = routePlanner ?? throw new ArgumentNullException(nameof(routePlanner));
+            _unifiedPathfinder = unifiedPathfinder ?? throw new ArgumentNullException(nameof(unifiedPathfinder));
             _cancellationTokenSource = new CancellationTokenSource();
             _activeTrainManagers = new List<TrainManagerService>();
 
@@ -546,7 +546,7 @@ namespace ClaudeSepareted.Services
                                     continue;
                                 }
 
-                                var routeResult = await _routePlanner.PlanAndConfigureRouteAsync(
+                                var routeResult = await _unifiedPathfinder.PlanAndConfigureRouteAsync(
                                     timetableEntry.SourcePlatform,
                                     timetableEntry.DestinationPlatform,
                                     train.Name);

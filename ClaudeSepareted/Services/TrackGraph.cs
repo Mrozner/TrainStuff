@@ -162,7 +162,7 @@ namespace ClaudeSepareted.Services
                                     connection.NextSection_DB_ID.Value,
                                     switchConfig.SwitchName,
                                     switchConfig.RequiredPosition,
-                                    connection.Direction == 1,
+                                    connection.Direction,
                                     1.0
                                 );
                                 enhancedConnections++;
@@ -335,7 +335,111 @@ namespace ClaudeSepareted.Services
             _edges[sourceId].Add(edge);
         }
 
-      
+        /// <summary>
+        /// Simple platform route finding method for TrackGraph compatibility
+        /// </summary>
+        public static async Task<List<int>?> FindSimplePlatformRouteAsync(ApplicationDbContext dbContext, Platforms sourcePlatform, Platforms destinationPlatform)
+        {
+            try
+            {
+                var sourceSectionId = sourcePlatform.SubSection_DB_ID;
+                var destSectionId = destinationPlatform.SubSection_DB_ID;
+
+                if (sourceSectionId <= 0 || destSectionId <= 0)
+                    return null;
+
+                // Simplified direct routing - if source and destination are same platform, return that section
+                if (sourcePlatform.DB_ID == destinationPlatform.DB_ID)
+                {
+                    Console.WriteLine($"[TrackGraph] Source and destination are same platform: {sourcePlatform.Name}");
+                    return new List<int> { sourceSectionId };
+                }
+
+                var route = new List<int> { sourceSectionId };
+                var currentSection = sourceSectionId;
+                var visited = new HashSet<int> { sourceSectionId };
+                var maxSteps = 20;
+
+                while (currentSection != destSectionId && visited.Count < maxSteps)
+                {
+                    var connections = await dbContext.VLookupSectionNextSection
+                        .FromSqlRaw("SELECT * FROM V_Lookup_Section_NextSection WHERE Section_DB_ID = {0}", currentSection)
+                        .ToListAsync();
+
+                    var bestConnection = FindBestConnectionTowardsDestination(connections, destSectionId, destinationPlatform.DB_ID);
+
+                    if (bestConnection != null && bestConnection.NextSection_DB_ID.HasValue && !visited.Contains(bestConnection.NextSection_DB_ID.Value))
+                    {
+                        route.Add(bestConnection.NextSection_DB_ID.Value);
+                        visited.Add(bestConnection.NextSection_DB_ID.Value);
+                        currentSection = bestConnection.NextSection_DB_ID.Value;
+
+                        Console.WriteLine($"[TrackGraph] Moving to section {currentSection} towards {destinationPlatform.Name}");
+
+                        if (currentSection == destSectionId)
+                        {
+                            Console.WriteLine($"[TrackGraph] ✓ Reached destination platform {destinationPlatform.Name}");
+                            return route;
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[TrackGraph] No valid path found from section {currentSection} to {destinationPlatform.Name}");
+                        break;
+                    }
+                }
+
+                Console.WriteLine($"[TrackGraph] Failed to find route to {destinationPlatform.Name} after {visited.Count} sections");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[TrackGraph] Error finding platform route: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Find the best connection that leads towards the destination platform
+        /// </summary>
+        private static VLookupSectionNextSection? FindBestConnectionTowardsDestination(List<VLookupSectionNextSection> connections, int destinationSectionId, int destinationPlatformId)
+        {
+            // Priority 1: Direct connection to destination section
+            var directConnection = connections.FirstOrDefault(c => c.NextSection_DB_ID == destinationSectionId);
+            if (directConnection != null)
+            {
+                Console.WriteLine("[TrackGraph] Found direct connection to destination section");
+                return directConnection;
+            }
+
+            // Priority 2: Connection that mentions the destination platform in its destinations
+            var platformConnection = connections.FirstOrDefault(c =>
+                !string.IsNullOrEmpty(c.Destinations) &&
+                c.Destinations.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                    .Select(d => d.Trim())
+                    .Any(d => int.TryParse(d, out var id) && id == destinationPlatformId));
+
+            if (platformConnection != null)
+            {
+                Console.WriteLine($"[TrackGraph] Found connection leading to destination platform ID {destinationPlatformId}");
+                return platformConnection;
+            }
+
+            // Priority 3: Any connection that moves us forward (avoid loops)
+            var forwardConnection = connections.FirstOrDefault(c =>
+                c.NextSection_DB_ID.HasValue &&
+                c.NextSection_DB_ID.Value != destinationSectionId);
+
+            if (forwardConnection != null)
+            {
+                Console.WriteLine("[TrackGraph] Using forward connection as fallback");
+                return forwardConnection;
+            }
+
+            return null;
+        }
+
+
         /// <summary>
         /// Finds the optimal route between two platforms using direct database queries
         /// </summary>
@@ -351,9 +455,8 @@ namespace ClaudeSepareted.Services
 
             try
             {
-                // Use the direct platform pathfinder for simplicity
-                var directPathfinder = new DirectPlatformPathfinder(dbContext);
-                var routeSections = await directPathfinder.FindDirectRouteAsync(sourcePlatform, destinationPlatform);
+                // For now, use simple database query approach since the unified service needs all dependencies
+                var routeSections = await FindSimplePlatformRouteAsync(dbContext, sourcePlatform, destinationPlatform);
 
                 if (routeSections == null || !routeSections.Any())
                 {
