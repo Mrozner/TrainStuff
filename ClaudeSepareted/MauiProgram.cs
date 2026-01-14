@@ -81,8 +81,8 @@ public static class MauiProgram
         // Virtual clock service
         builder.Services.AddSingleton<VirtualClock>();
 
-        // Admin MQTT service for speed control
-        builder.Services.AddSingleton<AdminMQTTService>();
+        // Centralized MQTT Infrastructure Service - SINGLE connection for entire app
+        builder.Services.AddSingleton<MqttInfrastructureService>();
 
         // Unified Pathfinding Service - consolidates all pathfinding functionality
         builder.Services.AddSingleton<UnifiedPathfindingService>();

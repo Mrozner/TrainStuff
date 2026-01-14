@@ -1,4 +1,5 @@
 using ClaudeSepareted.Domain;
+using ClaudeSepareted.Services;
 using MQTTnet;
 using System.Text;
 
@@ -8,52 +9,33 @@ namespace ClaudeSepareted
     {
         private readonly MQTTConfiguration _config;
         private readonly StatusNotificationService? _statusService;
-        private IMqttClient? _mqttClient;
-        private bool _isInitialized = false;
-        private readonly object _lockObject = new object();
+        private readonly MqttInfrastructureService _mqttService;
 
-        public AdminMQTTService(MQTTConfiguration config, StatusNotificationService statusService = null)
+        public AdminMQTTService(MQTTConfiguration config, MqttInfrastructureService mqttService, StatusNotificationService statusService = null)
         {
-            _config = config;
+            _config = config ?? throw new ArgumentNullException(nameof(config));
+            _mqttService = mqttService ?? throw new ArgumentNullException(nameof(mqttService));
             _statusService = statusService;
         }
 
         public async Task<bool> InitializeAsync()
         {
-            lock (_lockObject)
-            {
-                if (_isInitialized)
-                    return true;
-            }
-
             try
             {
                 _statusService?.ShowInfo("MQTT kapcsolódik...");
 
-                var factory = new MqttClientFactory();
-                _mqttClient = factory.CreateMqttClient();
+                var success = await _mqttService.InitializeAsync();
 
-                var options = new MqttClientOptionsBuilder()
-                    .WithTcpServer(_config.Address, _config.Port)
-                    .WithCleanSession()
-                    .Build();
-
-                var result = await _mqttClient.ConnectAsync(options);
-
-                if (result.ResultCode == MqttClientConnectResultCode.Success)
+                if (success)
                 {
-                    lock (_lockObject)
-                    {
-                        _isInitialized = true;
-                    }
-                    Console.WriteLine($"Admin MQTT connected to {_config.Address}:{_config.Port}");
+                    Console.WriteLine($"Admin MQTT connected via centralized infrastructure to {_config.Address}:{_config.Port}");
                     _statusService?.ShowSuccess($"MQTT csatlakoztatva ({_config.Address}:{_config.Port})");
                     return true;
                 }
                 else
                 {
-                    Console.WriteLine($"MQTT connection failed: {result.ResultCode}");
-                    _statusService?.ShowError($"MQTT kapcsolat hiba: {result.ResultCode}");
+                    Console.WriteLine("Centralized MQTT connection failed");
+                    _statusService?.ShowError("Központi MQTT kapcsolat hiba");
                     return false;
                 }
             }
@@ -67,51 +49,38 @@ namespace ClaudeSepareted
 
         public async Task<bool> SendTrainSpeedCommandAsync(string trainName, Speed speed, Direction direction = Direction.Forward)
         {
-            if (!_isInitialized)
-            {
-                _statusService?.ShowInfo($"MQTT csatlakozás...", trainName);
-                var connected = await InitializeAsync();
-                if (!connected)
-                {
-                    _statusService?.ShowError($"MQTT kapcsolat sikertelen", trainName);
-                    return false;
-                }
-            }
-
             try
             {
-                if (_mqttClient == null || !_mqttClient.IsConnected)
+                // Ensure centralized MQTT is connected
+                if (!_mqttService.IsConnected)
                 {
-                    Console.WriteLine("MQTT client not connected");
-                    _statusService?.ShowError($"MQTT nincs csatlakozva", trainName);
-                    return false;
+                    _statusService?.ShowInfo($"MQTT csatlakozás...", trainName);
+                    var connected = await InitializeAsync();
+                    if (!connected)
+                    {
+                        _statusService?.ShowError($"MQTT kapcsolat sikertelen", trainName);
+                        return false;
+                    }
                 }
 
-                // Ellenőrizzük és szükség esetén bekapcsoljuk a teljes terepaszt és a vonat power-ét
+                // Check system power and train power
                 if (!await EnsureSystemPowerOnAsync(trainName))
                 {
                     _statusService?.ShowError($"Rendszer power bekapcsolása sikertelen", trainName);
                     return false;
                 }
 
-                // Rocrail speed command format: <lc id="TrainName" v="speed" dir="true/false"/>
-                // Convert Speed enum to numeric value and Direction to boolean
-                int speedValue = (int)speed;
+                // Use RocrailCommandFactory for XML generation
                 bool directionValue = direction == Direction.Forward;
-                var rocrailCommand = $"<lc id=\"{trainName}\" v=\"{speedValue}\" dir=\"{directionValue.ToString().ToLower()}\"/>";
+                var rocrailCommand = RocrailCommandFactory.TrainVelocity(trainName, speed, directionValue);
 
                 _statusService?.ShowInfo($"Sebesség parancs küldése: {speed} ({direction})", trainName);
                 Console.WriteLine($"Sending Rocrail command: {rocrailCommand}");
 
-                var mqttMessage = new MqttApplicationMessageBuilder()
-                    .WithTopic(_config.TrainSpeedCommandTopic)
-                    .WithPayload(Encoding.UTF8.GetBytes(rocrailCommand))
-                    .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce)
-                    .Build();
+                // Use centralized MQTT service
+                var success = await _mqttService.PublishAsync(_config.TrainSpeedCommandTopic, rocrailCommand);
 
-                var result = await _mqttClient.PublishAsync(mqttMessage);
-
-                if (result.IsSuccess)
+                if (success)
                 {
                     _statusService?.ShowSuccess($"Sebesség beállítva: {speed} ({direction})", trainName);
                     Console.WriteLine($"Speed command sent to {trainName}: {speed} ({direction}) (Rocrail format)");
@@ -120,7 +89,7 @@ namespace ClaudeSepareted
                 else
                 {
                     _statusService?.ShowError($"Sebesség küldése sikertelen", trainName);
-                    Console.WriteLine($"Failed to send speed command to {trainName}");
+                    Console.WriteLine($"Failed to send speed command to {trainName} via MQTT infrastructure");
                     return false;
                 }
             }
@@ -141,20 +110,15 @@ namespace ClaudeSepareted
                 // Először a terepaszt/layout power-jét kapcsoljuk be
                 await Task.Delay(200); // Rövid várakozás a stabilitáshoz
 
-                // Rocrail system power command format: <sys cmd="go"/>
-                var systemPowerOnCommand = "<sys cmd=\"go\"/>";
+                // Use RocrailCommandFactory for XML generation
+                var systemPowerOnCommand = RocrailCommandFactory.SystemPower(true);
 
                 Console.WriteLine($"Sending system power-on command: {systemPowerOnCommand}");
 
-                var mqttMessage = new MqttApplicationMessageBuilder()
-                    .WithTopic(_config.TrainSpeedCommandTopic)
-                    .WithPayload(Encoding.UTF8.GetBytes(systemPowerOnCommand))
-                    .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce)
-                    .Build();
+                // Use centralized MQTT service
+                var success = await _mqttService.PublishAsync(_config.TrainSpeedCommandTopic, systemPowerOnCommand);
 
-                var result = await _mqttClient.PublishAsync(mqttMessage);
-
-                if (result.IsSuccess)
+                if (success)
                 {
                     _statusService?.ShowInfo($"Terepaszt power bekapcsolva", trainName);
                     Console.WriteLine($"System power-on command sent successfully");
@@ -167,7 +131,7 @@ namespace ClaudeSepareted
                 }
                 else
                 {
-                    Console.WriteLine($"Failed to send system power-on command");
+                    Console.WriteLine($"Failed to send system power-on command via MQTT infrastructure");
                     _statusService?.ShowError($"Terepaszt power bekapcsolása sikertelen", trainName);
                     return false;
                 }
@@ -185,20 +149,15 @@ namespace ClaudeSepareted
             {
                 _statusService?.ShowInfo($"Vonat power ellenőrzése: {trainName}", trainName);
 
-                // Rocrail power command format: <lc id="TrainName" cmd="on"/>
-                var powerOnCommand = $"<lc id=\"{trainName}\" cmd=\"on\"/>";
+                // Use RocrailCommandFactory for XML generation
+                var powerOnCommand = RocrailCommandFactory.TrainPower(trainName, true);
 
                 Console.WriteLine($"Sending power-on command: {powerOnCommand}");
 
-                var mqttMessage = new MqttApplicationMessageBuilder()
-                    .WithTopic(_config.TrainSpeedCommandTopic)
-                    .WithPayload(Encoding.UTF8.GetBytes(powerOnCommand))
-                    .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce)
-                    .Build();
+                // Use centralized MQTT service
+                var success = await _mqttService.PublishAsync(_config.TrainSpeedCommandTopic, powerOnCommand);
 
-                var result = await _mqttClient.PublishAsync(mqttMessage);
-
-                if (result.IsSuccess)
+                if (success)
                 {
                     _statusService?.ShowInfo($"Vonat power bekapcsolva: {trainName}", trainName);
                     Console.WriteLine($"Power-on command sent to {trainName}");
@@ -210,7 +169,7 @@ namespace ClaudeSepareted
                 }
                 else
                 {
-                    Console.WriteLine($"Failed to send power-on command to {trainName}");
+                    Console.WriteLine($"Failed to send power-on command to {trainName} via MQTT infrastructure");
                     return false;
                 }
             }
@@ -223,7 +182,7 @@ namespace ClaudeSepareted
 
         public async Task<bool> PowerOnTrainAsync(string trainName)
         {
-            if (!_isInitialized)
+            if (!_mqttService.IsConnected)
             {
                 _statusService?.ShowInfo($"MQTT csatlakozás...", trainName);
                 var connected = await InitializeAsync();
@@ -239,7 +198,7 @@ namespace ClaudeSepareted
 
         public async Task<bool> PowerOffTrainAsync(string trainName)
         {
-            if (!_isInitialized)
+            if (!_mqttService.IsConnected)
             {
                 _statusService?.ShowInfo($"MQTT csatlakozás...", trainName);
                 var connected = await InitializeAsync();
@@ -252,28 +211,16 @@ namespace ClaudeSepareted
 
             try
             {
-                if (_mqttClient == null || !_mqttClient.IsConnected)
-                {
-                    Console.WriteLine("MQTT client not connected");
-                    _statusService?.ShowError($"MQTT nincs csatlakozva", trainName);
-                    return false;
-                }
-
-                // Rocrail power off command format: <lc id="TrainName" cmd="off"/>
-                var powerOffCommand = $"<lc id=\"{trainName}\" cmd=\"off\"/>";
+                // Use RocrailCommandFactory for XML generation
+                var powerOffCommand = RocrailCommandFactory.TrainPower(trainName, false);
 
                 _statusService?.ShowInfo($"Vonat power kikapcsolása: {trainName}", trainName);
                 Console.WriteLine($"Sending power-off command: {powerOffCommand}");
 
-                var mqttMessage = new MqttApplicationMessageBuilder()
-                    .WithTopic(_config.TrainSpeedCommandTopic)
-                    .WithPayload(Encoding.UTF8.GetBytes(powerOffCommand))
-                    .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce)
-                    .Build();
+                // Use centralized MQTT service
+                var success = await _mqttService.PublishAsync(_config.TrainSpeedCommandTopic, powerOffCommand);
 
-                var result = await _mqttClient.PublishAsync(mqttMessage);
-
-                if (result.IsSuccess)
+                if (success)
                 {
                     _statusService?.ShowInfo($"Vonat power kikapcsolva: {trainName}", trainName);
                     Console.WriteLine($"Power-off command sent to {trainName}");
@@ -286,7 +233,7 @@ namespace ClaudeSepareted
                 else
                 {
                     _statusService?.ShowError($"Vonat power kikapcsolása sikertelen", trainName);
-                    Console.WriteLine($"Failed to send power-off command to {trainName}");
+                    Console.WriteLine($"Failed to send power-off command to {trainName} via MQTT infrastructure");
                     return false;
                 }
             }
@@ -302,7 +249,7 @@ namespace ClaudeSepareted
         {
             _statusService?.ShowInfo($"Attempting switch command: {switchName} -> {position}");
 
-            if (!_isInitialized)
+            if (!_mqttService.IsConnected)
             {
                 var connected = await InitializeAsync();
                 if (!connected)
@@ -314,33 +261,22 @@ namespace ClaudeSepareted
 
             try
             {
-                if (_mqttClient == null || !_mqttClient.IsConnected)
-                {
-                    _statusService?.ShowError("MQTT client not connected for switch command");
-                    return false;
-                }
-
-                // Rocrail switch command format: <sw id="SwitchName" cmd="straight/turnout"/>
-                var rocrailCommand = $"<sw id=\"{switchName}\" cmd=\"{position}\"/>";
+                // Use RocrailCommandFactory for XML generation
+                var rocrailCommand = RocrailCommandFactory.Switch(switchName, position);
 
                 _statusService?.ShowInfo($"Sending MQTT: {rocrailCommand} to topic: {_config.TrackCommandTopic}");
 
-                var mqttMessage = new MqttApplicationMessageBuilder()
-                    .WithTopic(_config.TrackCommandTopic)
-                    .WithPayload(Encoding.UTF8.GetBytes(rocrailCommand))
-                    .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce)
-                    .Build();
+                // Use centralized MQTT service
+                var success = await _mqttService.PublishAsync(_config.TrackCommandTopic, rocrailCommand);
 
-                var result = await _mqttClient.PublishAsync(mqttMessage);
-
-                if (result.IsSuccess)
+                if (success)
                 {
                     _statusService?.ShowSuccess($"Switch command sent: {switchName} -> {position}");
                     return true;
                 }
                 else
                 {
-                    _statusService?.ShowError($"Failed to send switch: {switchName} -> {position}. Reason: {result.ReasonString}");
+                    _statusService?.ShowError($"Failed to send switch: {switchName} -> {position}");
                     return false;
                 }
             }
@@ -353,11 +289,9 @@ namespace ClaudeSepareted
 
         public async Task DisconnectAsync()
         {
-            if (_mqttClient != null && _mqttClient.IsConnected)
-            {
-                await _mqttClient.DisconnectAsync();
-                Console.WriteLine("Admin MQTT disconnected");
-            }
+            // No need to disconnect from centralized MQTT service
+            // The infrastructure service manages the connection lifecycle
+            Console.WriteLine("Admin MQTT service disconnect request - managed by centralized infrastructure");
         }
     }
 }

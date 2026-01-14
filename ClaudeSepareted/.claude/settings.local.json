@@ -13,7 +13,9 @@
       "Bash(dir:*)",
       "Bash(sqlcmd:*)",
       "Bash(dotnet-ef migrations add:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(Select-String:*)",
+      "Bash(Select-Object -Last 20)"
     ],
     "deny": [],
     "ask": []

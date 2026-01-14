@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.EntityFrameworkCore;
 using MQTTnet;
+using ClaudeSepareted.Domain;
 
 namespace ClaudeSepareted.Services
 {
@@ -18,6 +19,7 @@ namespace ClaudeSepareted.Services
         private readonly IServiceProvider _serviceProvider;
         private readonly UnifiedPathfindingService _unifiedPathfinder;
         private readonly TrainArrivalMonitorService _arrivalMonitor;
+        private readonly MqttInfrastructureService _mqttService;
         private readonly CancellationTokenSource _cancellationTokenSource;
         private readonly List<TrainManagerService> _activeTrainManagers;
         private readonly Dictionary<string, DateTime> _recentlyProcessedTrains = new Dictionary<string, DateTime>();
@@ -26,8 +28,7 @@ namespace ClaudeSepareted.Services
         private readonly Dictionary<string, string> _lastTrainCommands = new Dictionary<string, string>();
         private readonly Dictionary<int, TrainManagerService> _trainManagers = new Dictionary<int, TrainManagerService>();
         private readonly object _lockObject = new object();
-        private IMqttClient? _mqttClient;
-        private bool _isInitialized = false;
+        private readonly AutoResetEvent _trainCompletedEvent = new AutoResetEvent(false);
 
         public TrackHandlerService(
             VirtualClock virtualClock,
@@ -36,7 +37,8 @@ namespace ClaudeSepareted.Services
             StatusNotificationService statusService,
             IServiceProvider serviceProvider,
             UnifiedPathfindingService unifiedPathfinder,
-            TrainArrivalMonitorService arrivalMonitor)
+            TrainArrivalMonitorService arrivalMonitor,
+            MqttInfrastructureService mqttService)
         {
             _virtualClock = virtualClock ?? throw new ArgumentNullException(nameof(virtualClock));
             _dbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
@@ -45,6 +47,7 @@ namespace ClaudeSepareted.Services
             _serviceProvider = serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
             _unifiedPathfinder = unifiedPathfinder ?? throw new ArgumentNullException(nameof(unifiedPathfinder));
             _arrivalMonitor = arrivalMonitor ?? throw new ArgumentNullException(nameof(arrivalMonitor));
+            _mqttService = mqttService ?? throw new ArgumentNullException(nameof(mqttService));
             _cancellationTokenSource = new CancellationTokenSource();
             _activeTrainManagers = new List<TrainManagerService>();
 
@@ -73,6 +76,16 @@ namespace ClaudeSepareted.Services
                 Name = "TrackHandlerService"
             };
             thread.Start();
+        }
+
+        /// <summary>
+        /// Called when a train completes its journey and releases switches.
+        /// This triggers immediate reprocessing of waiting trains.
+        /// </summary>
+        public void OnTrainCompleted(string trainName)
+        {
+            Console.WriteLine($"[TrackHandlerService] Train {trainName} completed - signaling to reprocess waiting trains");
+            _trainCompletedEvent.Set();
         }
 
         public void Stop()
@@ -164,18 +177,18 @@ namespace ClaudeSepareted.Services
         {
             try
             {
-                Console.WriteLine("[TrackHandlerService] Midnight reset: resetting all timetable entries to Upcoming");
+                Console.WriteLine("[TrackHandlerService] ============================================");
+                Console.WriteLine("[TrackHandlerService] VIRTUAL MIDNIGHT RESET - Resetting everything");
+                Console.WriteLine("[TrackHandlerService] ============================================");
 
                 using (var scope = _serviceProvider.CreateScope())
                 {
                     var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
 
-                    // Get all non-upcoming entries and reset them to upcoming
-                    var entriesToReset = dbContext.TimetableEntries
-                        .Where(te => te.EntryState != EntryState.Upcoming)
-                        .ToList();
+                    // Reset ALL timetable entries to Upcoming (complete daily reset)
+                    var allEntries = dbContext.TimetableEntries.ToList();
 
-                    foreach (var entry in entriesToReset)
+                    foreach (var entry in allEntries)
                     {
                         entry.EntryState = EntryState.Upcoming;
                         entry.ArrivedTime = null; // Clear arrived time
@@ -183,126 +196,74 @@ namespace ClaudeSepareted.Services
 
                     dbContext.SaveChanges();
 
-                    Console.WriteLine($"[TrackHandlerService] Reset {entriesToReset.Count} timetable entries to Upcoming");
-                    _statusService?.ShowInfo($"Éjfél: {entriesToReset.Count} menetrendi bejegyzés visszaállítva 'Érkező' állapotra");
+                    Console.WriteLine($"[TrackHandlerService] ✅ Reset {allEntries.Count} timetable entries to Upcoming");
+                    _statusService?.ShowInfo($"Éjfél: {allEntries.Count} menetrendi bejegyzés visszaállítva 'Érkező' állapotra");
                 }
+
+                // Clear the recently processed trains dictionary to allow reprocessing
+                lock (_lockObject)
+                {
+                    var processedCount = _recentlyProcessedTrains.Count;
+                    _recentlyProcessedTrains.Clear();
+                    Console.WriteLine($"[TrackHandlerService] ✅ Cleared {processedCount} entries from recently processed list");
+                }
+
+                // Reset all train states to Waiting
+                using (var scope = _serviceProvider.CreateScope())
+                {
+                    var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+                    var allTrains = dbContext.Trains.ToList();
+
+                    foreach (var train in allTrains)
+                    {
+                        train.State = TrainState.Waiting;
+                        train.CurrentSpeed = Speed.STOP;
+                    }
+
+                    dbContext.SaveChanges();
+                    Console.WriteLine($"[TrackHandlerService] ✅ Reset {allTrains.Count} trains to Waiting state");
+                }
+
+                Console.WriteLine("[TrackHandlerService] ============================================");
+                Console.WriteLine("[TrackHandlerService] MIDNIGHT RESET COMPLETE - New virtual day started");
+                Console.WriteLine("[TrackHandlerService] ============================================");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[TrackHandlerService] Error during midnight reset: {ex.Message}");
+                Console.WriteLine($"[TrackHandlerService] ❌ Error during midnight reset: {ex.Message}");
                 _statusService?.ShowError($"Éjfél alaphelyzetbe állítási hiba: {ex.Message}");
             }
         }
 
-        private async Task<bool> InitializeMqttAsync()
-        {
-            if (_isInitialized)
-                return true;
-
-            try
-            {
-                Console.WriteLine($"[TrackHandlerService] Initializing MQTT connection to {_mqttConfig.Address}:{_mqttConfig.Port}");
-                _statusService?.ShowInfo("Track Handler Service MQTT kapcsolódik...");
-
-                var factory = new MqttClientFactory();
-                _mqttClient = factory.CreateMqttClient();
-
-                var clientId = $"TrackHandler_{Guid.NewGuid():N}";
-                Console.WriteLine($"[TrackHandlerService] Using Client ID: {clientId}");
-
-                var options = new MqttClientOptionsBuilder()
-                    .WithTcpServer(_mqttConfig.Address, _mqttConfig.Port)
-                    .WithClientId(clientId)
-                    .WithCleanSession()
-                    .WithKeepAlivePeriod(TimeSpan.FromSeconds(60))
-                    .Build();
-
-                Console.WriteLine($"[TrackHandlerService] Attempting to connect to MQTT broker...");
-
-                var result = await _mqttClient.ConnectAsync(options);
-
-                Console.WriteLine($"[TrackHandlerService] MQTT Connection Result: {result.ResultCode}");
-
-                if (result.ResultCode == MqttClientConnectResultCode.Success)
-                {
-                    _isInitialized = true;
-                    Console.WriteLine($"[TrackHandlerService] MQTT successfully connected to {_mqttConfig.Address}:{_mqttConfig.Port}");
-
-                    // Test connection with a simple ping message
-                    var testMessage = new MqttApplicationMessageBuilder()
-                        .WithTopic("test/connection")
-                        .WithPayload(System.Text.Encoding.UTF8.GetBytes("ping"))
-                        .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce)
-                        .Build();
-
-                    var publishResult = await _mqttClient.PublishAsync(testMessage);
-                    Console.WriteLine($"[TrackHandlerService] Test message published");
-
-                    _statusService?.ShowSuccess("Track Handler Service MQTT csatlakoztatva");
-                    return true;
-                }
-                else
-                {
-                    Console.WriteLine($"[TrackHandlerService] MQTT connection failed: {result.ResultCode}");
-                    _statusService?.ShowError($"Track Handler Service MQTT kapcsolat hiba: {result.ResultCode}");
-                    return false;
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[TrackHandlerService] MQTT initialization error: {ex.Message}");
-                Console.WriteLine($"[TrackHandlerService] Stack trace: {ex.StackTrace}");
-                _statusService?.ShowError($"Track Handler Service MQTT inicializációs hiba: {ex.Message}");
-                return false;
-            }
-        }
-
+        
         private async Task SendSwitchCommandAsync(string switchId, string position)
         {
             Console.WriteLine($"[TrackHandlerService] SendSwitchCommand called: switchId={switchId}, position={position}");
 
-            if (!_isInitialized || _mqttClient == null || !_mqttClient.IsConnected)
-            {
-                Console.WriteLine($"[TrackHandlerService] MQTT not initialized - initializing...");
-                if (!await InitializeMqttAsync())
-                {
-                    Console.WriteLine($"[TrackHandlerService] Failed to initialize MQTT, skipping switch command");
-                    return;
-                }
-            }
-
             try
             {
-                // Rocrail switch command format: <sw id="SwitchID" cmd="straight"/> or <sw id="SwitchID" cmd="turnout"/>
-                var rocrailCommand = $"<sw id=\"{switchId}\" cmd=\"{position}\"/>";
+                // Use RocrailCommandFactory for XML generation
+                var rocrailCommand = RocrailCommandFactory.Switch(switchId, position);
                 var topic = _mqttConfig.TrackCommandTopic;
 
-                Console.WriteLine($"[TrackHandlerService] MQTT Client Status: IsConnected={_mqttClient.IsConnected}");
                 Console.WriteLine($"[TrackHandlerService] Publishing to topic: {topic}");
                 Console.WriteLine($"[TrackHandlerService] Publishing message: {rocrailCommand}");
 
-                  // Send the switch command (deduplication is handled in SetSwitchesForRoute)
+                // Send the switch command using centralized MQTT service (deduplication is handled in SetSwitchesForRoute)
                 Console.WriteLine($"[TrackHandlerService] Sending switch command to MQTT: {rocrailCommand}");
 
-                var mqttMessage = new MqttApplicationMessageBuilder()
-                    .WithTopic(topic)
-                    .WithPayload(System.Text.Encoding.UTF8.GetBytes(rocrailCommand))
-                    .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce)
-                    .Build();
+                var success = await _mqttService.PublishAsync(topic, rocrailCommand);
 
-                var publishResult = await _mqttClient.PublishAsync(mqttMessage);
-                Console.WriteLine($"[TrackHandlerService] Switch command published, result: {publishResult.ReasonCode}");
-
-                      if (publishResult.IsSuccess)
-              {
-                  Console.WriteLine($"[TrackHandlerService] Switch command sent successfully: {switchId} -> {position}");
-                  _statusService?.ShowInfo($"Váltó állítása: {switchId} -> {position}");
-              }
-              else
-              {
-                  Console.WriteLine($"[TrackHandlerService] Switch command failed to publish: {publishResult.ReasonCode}");
-                  _statusService?.ShowError($"Váltó állítási hiba: {switchId} -> {position}");
-              }
+                if (success)
+                {
+                    Console.WriteLine($"[TrackHandlerService] Switch command sent successfully: {switchId} -> {position}");
+                    _statusService?.ShowInfo($"Váltó állítása: {switchId} -> {position}");
+                }
+                else
+                {
+                    Console.WriteLine($"[TrackHandlerService] Switch command failed to publish via MQTT infrastructure");
+                    _statusService?.ShowError($"Váltó állítási hiba: {switchId} -> {position}");
+                }
             }
             catch (Exception ex)
             {
@@ -314,27 +275,25 @@ namespace ClaudeSepareted.Services
 
         private async Task SendSystemPowerCommandAsync()
         {
-            if (!_isInitialized || _mqttClient == null || !_mqttClient.IsConnected)
-            {
-                if (!await InitializeMqttAsync())
-                    return;
-            }
-
             try
             {
-                // Rocrail system power command: <sys cmd="go"/>
-                var powerCommand = "<sys cmd=\"go\"/>";
+                // Use RocrailCommandFactory for XML generation
+                var powerCommand = RocrailCommandFactory.SystemPower(true);
 
                 Console.WriteLine($"[TrackHandlerService] Sending system power command: {powerCommand}");
 
-                var mqttMessage = new MqttApplicationMessageBuilder()
-                    .WithTopic(_mqttConfig.TrackCommandTopic)
-                    .WithPayload(System.Text.Encoding.UTF8.GetBytes(powerCommand))
-                    .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce)
-                    .Build();
+                // Use centralized MQTT service
+                var success = await _mqttService.PublishAsync(_mqttConfig.TrackCommandTopic, powerCommand);
 
-                await _mqttClient.PublishAsync(mqttMessage);
-                await Task.Delay(1000); // Wait for power to come on
+                if (success)
+                {
+                    await Task.Delay(1000); // Wait for power to come on
+                }
+                else
+                {
+                    Console.WriteLine($"[TrackHandlerService] Failed to publish system power command via MQTT infrastructure");
+                    _statusService?.ShowError($"Rendszer áramkör hiba: MQTT sikertelen");
+                }
             }
             catch (Exception ex)
             {
@@ -345,16 +304,11 @@ namespace ClaudeSepareted.Services
 
         private async Task SendSignalCommandAsync(string signalId, string aspect)
         {
-            if (!_isInitialized || _mqttClient == null || !_mqttClient.IsConnected)
-            {
-                if (!await InitializeMqttAsync())
-                    return;
-            }
 
             try
             {
-                // Rocrail signal command format: <sg id="SignalID" aspect="green"/>
-                var rocrailCommand = $"<sg id=\"{signalId}\" aspect=\"{aspect}\"/>";
+                // Use RocrailCommandFactory for XML generation
+                var rocrailCommand = RocrailCommandFactory.Signal(signalId, aspect);
 
                 // Check if this signal command is different from the last one sent
                 lock (_lockObject)
@@ -373,14 +327,18 @@ namespace ClaudeSepareted.Services
 
                 Console.WriteLine($"[TrackHandlerService] Sending signal command: {rocrailCommand}");
 
-                var mqttMessage = new MqttApplicationMessageBuilder()
-                    .WithTopic(_mqttConfig.TrackSignalTopic)
-                    .WithPayload(System.Text.Encoding.UTF8.GetBytes(rocrailCommand))
-                    .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce)
-                    .Build();
+                // Use centralized MQTT service
+                var success = await _mqttService.PublishAsync(_mqttConfig.TrackSignalTopic, rocrailCommand);
 
-                await _mqttClient.PublishAsync(mqttMessage);
-                _statusService?.ShowInfo($"Jelzés állítása: {signalId} -> {aspect}");
+                if (success)
+                {
+                    _statusService?.ShowInfo($"Jelzés állítása: {signalId} -> {aspect}");
+                }
+                else
+                {
+                    Console.WriteLine($"[TrackHandlerService] Failed to publish signal command via MQTT infrastructure");
+                    _statusService?.ShowError($"Jelzés állítási hiba: {signalId} -> {aspect} (MQTT sikertelen)");
+                }
             }
             catch (Exception ex)
             {
@@ -393,18 +351,18 @@ namespace ClaudeSepareted.Services
         {
             Console.WriteLine("[TrackHandlerService] Started monitoring schedule and virtual clock");
 
-            // Initialize MQTT and system power
+            // Initialize centralized MQTT and system power
             Console.WriteLine("[TrackHandlerService] Starting MQTT initialization...");
-            if (await InitializeMqttAsync())
+            if (await _mqttService.InitializeAsync())
             {
-                Console.WriteLine("[TrackHandlerService] MQTT connection established");
+                Console.WriteLine("[TrackHandlerService] MQTT connection established via centralized infrastructure");
                 // Send system power command once when service starts
                 await SendSystemPowerCommandAsync();
                 Console.WriteLine("[TrackHandlerService] System power command sent");
             }
             else
             {
-                Console.WriteLine("[TrackHandlerService] MQTT initialization failed - no power command sent");
+                Console.WriteLine("[TrackHandlerService] Centralized MQTT initialization failed - no power command sent");
             }
 
             while (!cancellationToken.IsCancellationRequested)
@@ -419,6 +377,8 @@ namespace ClaudeSepareted.Services
                     using (var scope = _serviceProvider.CreateScope())
                     {
                         var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+                        // Get all upcoming entries
                         upcomingSchedules = dbContext.TimetableEntries
                             .Include(te => te.Train)
                             .Include(te => te.SourcePlatform)
@@ -426,6 +386,7 @@ namespace ClaudeSepareted.Services
                             .Include(te => te.DestinationPlatform)
                                 .ThenInclude(dp => dp.Station)
                             .Where(te => te.EntryState == EntryState.Upcoming && te.StartTime <= currentTimeOnly)
+                            .OrderBy(te => te.StartTime)
                             .ToList();
                     }
 
@@ -434,23 +395,19 @@ namespace ClaudeSepareted.Services
                         if (cancellationToken.IsCancellationRequested)
                             break;
 
-                        // Create unique key for this schedule entry (train + time)
-                        var scheduleKey = $"{timetableEntry.Train_DB_ID}_{timetableEntry.StartTime:hh\\:mm}";
+                        // Create unique key for this schedule entry using the DB_ID to ensure each entry is processed only once
+                        var scheduleKey = $"entry_{timetableEntry.DB_ID}";
 
-                        // Check if this train was recently processed within the last minute
+                        // Check if this exact timetable entry was already processed
                         lock (_lockObject)
                         {
                             if (_recentlyProcessedTrains.ContainsKey(scheduleKey))
                             {
-                                var lastProcessed = _recentlyProcessedTrains[scheduleKey];
-                                if ((currentTime - lastProcessed).TotalMinutes < 1.0)
-                                {
-                                    // Skip this entry as it was already processed recently
-                                    continue;
-                                }
+                                // This entry was already processed - skip it completely
+                                continue;
                             }
 
-                            // Mark this train as recently processed
+                            // Mark this entry as processed (permanent, not time-based)
                             _recentlyProcessedTrains[scheduleKey] = currentTime;
                         }
 
@@ -525,40 +482,68 @@ namespace ClaudeSepareted.Services
                         }, cancellationToken);
 
   
-                        // Check if train already has an active manager
+                        // Check if train already has an active manager from a previous journey
                         TrainManagerService trainManager = null;
-                        bool needsNewManager = false;
+                        bool skipNewSchedule = false;
 
                         lock (_lockObject)
                         {
-                            if (!_trainManagers.ContainsKey(timetableEntry.Train_DB_ID))
+                            if (_trainManagers.ContainsKey(timetableEntry.Train_DB_ID))
                             {
-                                // Create new manager only if one doesn't exist for this train
-                                needsNewManager = true;
-                            }
-                            else
-                            {
-                                // Use existing manager
-                                trainManager = _trainManagers[timetableEntry.Train_DB_ID];
-                                Console.WriteLine($"[TrackHandlerService] Using existing TrainManagerService for train {train.Name} (ID: {timetableEntry.Train_DB_ID})");
+                                var oldManager = _trainManagers[timetableEntry.Train_DB_ID];
+
+                                // Handle based on train state
+                                if (train.State == TrainState.Arrived)
+                                {
+                                    // Train has arrived - just remove the old manager without stopping the train
+                                    // The train is already stopped, so we can start a new journey
+                                    Console.WriteLine($"[TrackHandlerService] Train {train.Name} arrived - removing old manager for new journey");
+                                    _activeTrainManagers.Remove(oldManager);
+                                    _trainManagers.Remove(timetableEntry.Train_DB_ID);
+
+                                    // Reset train state to Waiting for the new journey
+                                    train.State = TrainState.Waiting;
+                                    Console.WriteLine($"[TrackHandlerService] Reset train {train.Name} state to Waiting for new schedule");
+                                }
+                                else if (train.State == TrainState.Stopped)
+                                {
+                                    // Train is stopped - similar to arrived, just remove the manager
+                                    Console.WriteLine($"[TrackHandlerService] Train {train.Name} stopped - removing old manager for new journey");
+                                    _activeTrainManagers.Remove(oldManager);
+                                    _trainManagers.Remove(timetableEntry.Train_DB_ID);
+
+                                    // Reset train state to Waiting for the new journey
+                                    train.State = TrainState.Waiting;
+                                }
+                                else if (train.State == TrainState.Moving || train.State == TrainState.PrepareToStop)
+                                {
+                                    // Train is still actively running - cannot start new schedule yet
+                                    Console.WriteLine($"[TrackHandlerService] Train {train.Name} still active (state: {train.State}) - cannot start new schedule yet");
+                                    skipNewSchedule = true;
+                                }
+                                else
+                                {
+                                    // Any other state - just remove the manager and proceed
+                                    Console.WriteLine($"[TrackHandlerService] Train {train.Name} in state {train.State} - removing old manager");
+                                    _activeTrainManagers.Remove(oldManager);
+                                    _trainManagers.Remove(timetableEntry.Train_DB_ID);
+                                    train.State = TrainState.Waiting;
+                                }
                             }
                         }
 
-                        if (needsNewManager)
+                        // If the train is still running, skip this schedule entry for now
+                        if (skipNewSchedule)
                         {
-                            // Create new Train Manager Service
-                            trainManager = new TrainManagerService(_virtualClock, train, timetableEntry, _mqttConfig, _statusService, _serviceProvider, this);
-
-                            lock (_lockObject)
-                            {
-                                _trainManagers[timetableEntry.Train_DB_ID] = trainManager;
-                                _activeTrainManagers.Add(trainManager);
-                            }
-
-                            Console.WriteLine($"[TrackHandlerService] Created new TrainManagerService for train {train.Name} (ID: {timetableEntry.Train_DB_ID})");
+                            Console.WriteLine($"[TrackHandlerService] Skipping schedule entry for train {train.Name} - previous journey still in progress");
+                            continue;
                         }
 
-                        // Plan route and configure switches before starting train movement
+                        // Plan route first to get required switches, then attempt reservation
+                        List<string> requiredSwitchNames = new List<string>();
+                        bool routePlanningSuccessful = false;
+                        bool canStartTrain = false;
+
                         try
                         {
                             var sourceStation = timetableEntry.SourceStation?.Name ?? timetableEntry.SourcePlatform?.Station?.Name;
@@ -572,56 +557,157 @@ namespace ClaudeSepareted.Services
                                 if (timetableEntry.SourcePlatform == null || timetableEntry.DestinationPlatform == null)
                                 {
                                     Console.WriteLine($"[TrackHandlerService] Route planning failed for {train.Name}: Source or destination platform not specified");
-                                    continue;
-                                }
-
-                                var routeResult = await _unifiedPathfinder.PlanAndConfigureRouteAsync(
-                                    timetableEntry.SourcePlatform,
-                                    timetableEntry.DestinationPlatform,
-                                    train.Name,
-                                    train.Direction);
-
-                                if (!routeResult.Success)
-                                {
-                                    Console.WriteLine($"[TrackHandlerService] Route planning failed for {train.Name}: {routeResult.ErrorMessage}");
-                                    _statusService?.ShowError($"Route planning failed: {routeResult.ErrorMessage}", train.Name);
-
-                                    // Continue with train movement even if route planning fails
-                                    // The train manager will handle basic movement
+                                    canStartTrain = false;
                                 }
                                 else
                                 {
-                                    Console.WriteLine($"[TrackHandlerService] Route planning successful for {train.Name}: {routeResult.ConfiguredSwitches.Count} switches configured");
-                                    _statusService?.ShowSuccess($"Route ready: {routeResult.ConfiguredSwitches.Count} switches configured", train.Name);
+                                    // Step 1: Plan route without configuring switches to get required switch list
+                                    var routeResult = await _unifiedPathfinder.PlanAndConfigureRouteAsync(
+                                        timetableEntry.SourcePlatform,
+                                        timetableEntry.DestinationPlatform,
+                                        train.Name,
+                                        train.Direction,
+                                        configureSwitches: false);  // Don't configure switches yet
+
+                                    if (!routeResult.Success)
+                                    {
+                                        Console.WriteLine($"[TrackHandlerService] Route planning failed for {train.Name}: {routeResult.ErrorMessage}");
+                                        _statusService?.ShowError($"Route planning failed: {routeResult.ErrorMessage}", train.Name);
+                                        canStartTrain = false;
+                                    }
+                                    else
+                                    {
+                                        routePlanningSuccessful = true;
+                                        requiredSwitchNames = routeResult.ConfiguredSwitches.Select(sc => sc.SwitchName).ToList();
+                                        Console.WriteLine($"[TrackHandlerService] Route planned successfully for {train.Name}: {requiredSwitchNames.Count} switches required");
+
+                                        // Step 2: Attempt to reserve switches
+                                        bool reservationSuccess = _unifiedPathfinder.TryReserveSwitches(requiredSwitchNames, train.Name);
+
+                                        if (reservationSuccess)
+                                        {
+                                            Console.WriteLine($"[TrackHandlerService] ✅ Switch reservation successful for {train.Name}");
+                                            canStartTrain = true;
+                                        }
+                                        else
+                                        {
+                                            Console.WriteLine($"[TrackHandlerService] ⛔ {train.Name} waiting for resources (switches locked by another train)");
+                                            _statusService?.ShowWarning($"Várakozás: {train.Name} (másik vonat foglalja a váltókat)", train.Name);
+                                            canStartTrain = false;
+                                        }
+                                    }
                                 }
                             }
                             else
                             {
                                 Console.WriteLine($"[TrackHandlerService] Cannot plan route for {train.Name}: Missing station information");
                                 _statusService?.ShowWarning("Route planning skipped: Missing station info", train.Name);
+                                canStartTrain = false;
                             }
                         }
                         catch (Exception ex)
                         {
                             Console.WriteLine($"[TrackHandlerService] Error in route planning for {train.Name}: {ex.Message}");
                             _statusService?.ShowError($"Route planning error: {ex.Message}", train.Name);
-                            // Continue with train movement even if route planning fails
+                            canStartTrain = false;
                         }
 
-                        // Start the train manager if it hasn't been started yet
-                        if (needsNewManager)
+                        // If reservation failed, mark entry back to Upcoming and remove from processed to retry next loop
+                        if (!canStartTrain && routePlanningSuccessful)
                         {
+                            Console.WriteLine($"[TrackHandlerService] Train {train.Name} will wait - resetting to Upcoming state for retry");
+
+                            // Reset the timetable entry state back to Upcoming so it will be retried
+                            using (var scope = _serviceProvider.CreateScope())
+                            {
+                                try
+                                {
+                                    var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+                                    var trackedEntry = dbContext.TimetableEntries.Find(timetableEntry.DB_ID);
+                                    if (trackedEntry != null)
+                                    {
+                                        trackedEntry.EntryState = EntryState.Upcoming;
+                                        dbContext.SaveChanges();
+                                        Console.WriteLine($"[TrackHandlerService] Reset EntryState to Upcoming for train {train.Name} (will retry)");
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"[TrackHandlerService] Database error resetting EntryState: {ex.Message}");
+                                }
+                            }
+
+                            // Remove from recently processed so this entry will be reconsidered in next loop
+                            lock (_lockObject)
+                            {
+                                scheduleKey = $"entry_{timetableEntry.DB_ID}";
+                                _recentlyProcessedTrains.Remove(scheduleKey);
+                            }
+
+                            continue; // Skip this train for this iteration
+                        }
+
+                        // Only create train manager and start if we can proceed
+                        if (canStartTrain)
+                        {
+                            // Step 3: Create TrainManagerService with reserved switches
+                            trainManager = new TrainManagerService(_virtualClock, train, timetableEntry, _mqttConfig, _statusService, _serviceProvider, _mqttService, this, requiredSwitchNames, _unifiedPathfinder);
+
+                            lock (_lockObject)
+                            {
+                                _trainManagers[timetableEntry.Train_DB_ID] = trainManager;
+                                _activeTrainManagers.Add(trainManager);
+                            }
+
+                            Console.WriteLine($"[TrackHandlerService] Created new TrainManagerService for train {train.Name} (ID: {timetableEntry.Train_DB_ID}) with {requiredSwitchNames.Count} reserved switches");
+
+                            // Step 4: Now configure the switches (we have the locks)
+                            if (requiredSwitchNames.Any())
+                            {
+                                try
+                                {
+                                    var routeResult = await _unifiedPathfinder.PlanAndConfigureRouteAsync(
+                                        timetableEntry.SourcePlatform,
+                                        timetableEntry.DestinationPlatform,
+                                        train.Name,
+                                        train.Direction,
+                                        configureSwitches: true);  // Now actually configure switches
+
+                                    if (!routeResult.Success)
+                                    {
+                                        Console.WriteLine($"[TrackHandlerService] Switch configuration failed for {train.Name}: {routeResult.ErrorMessage}");
+                                        _statusService?.ShowError($"Switch config failed: {routeResult.ErrorMessage}", train.Name);
+                                    }
+                                    else
+                                    {
+                                        Console.WriteLine($"[TrackHandlerService] Switch configuration successful for {train.Name}: {routeResult.ConfiguredSwitches.Count} switches configured");
+                                        _statusService?.ShowSuccess($"Route configured: {routeResult.ConfiguredSwitches.Count} switches", train.Name);
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"[TrackHandlerService] Error in switch configuration for {train.Name}: {ex.Message}");
+                                    _statusService?.ShowError($"Switch config error: {ex.Message}", train.Name);
+                                }
+                            }
+
+                            // Start the train manager for the new journey
                             trainManager.Start();
-                        }
 
-                        // Register the train for arrival monitoring
-                        if (timetableEntry.DestinationPlatform != null)
+                            // Register the train for arrival monitoring
+                            if (timetableEntry.DestinationPlatform != null)
+                            {
+                                _arrivalMonitor.RegisterTrainArrival(train, timetableEntry.DestinationPlatform);
+                            }
+
+                            Console.WriteLine($"[TrackHandlerService] Spawned TrainManagerService for train {train.Name}");
+                            _statusService?.ShowInfo($"Indítás: {train.Name} ({timetableEntry.SourceStation?.Name} -> {timetableEntry.DestinationStation?.Name})");
+                        }
+                        else
                         {
-                            _arrivalMonitor.RegisterTrainArrival(train, timetableEntry.DestinationPlatform);
+                            // Route planning failed completely - continue without starting train
+                            continue;
                         }
-
-                        Console.WriteLine($"[TrackHandlerService] Spawned TrainManagerService for train {train.Name}");
-                        _statusService?.ShowInfo($"Indítás: {train.Name} ({timetableEntry.SourceStation?.Name} -> {timetableEntry.DestinationStation?.Name})");
                     }
 
                     // Clean up only truly completed train managers (not those that just finished one journey)
@@ -641,17 +727,9 @@ namespace ClaudeSepareted.Services
                         }
                         _activeTrainManagers.RemoveAll(manager => manager.IsCompleted);
 
-                        // Clean up old entries in recently processed trains (older than 5 minutes)
-                        var cutoffTime = currentTime.AddMinutes(-5);
-                        var keysToRemove = _recentlyProcessedTrains
-                            .Where(kvp => kvp.Value < cutoffTime)
-                            .Select(kvp => kvp.Key)
-                            .ToList();
-
-                        foreach (var key in keysToRemove)
-                        {
-                            _recentlyProcessedTrains.Remove(key);
-                        }
+                        // NOTE: _recentlyProcessedTrains is cleared at virtual midnight in OnMidnightReset()
+                        // We don't use time-based cleanup here because the virtual clock resets to 2024-01-01
+                        // which would make all timestamps appear to be "in the future" and never expire
 
                         // Clean up old train commands to prevent memory growth
                         var oldTrainCommandKeys = _lastTrainCommands.Keys.Where(k => k.Contains("_")).Take(10).ToList();
@@ -667,8 +745,9 @@ namespace ClaudeSepareted.Services
                     _statusService?.ShowError($"Track Handler Service hiba: {ex.Message}");
                 }
 
-                // Reduced frequency check (1 second) to reduce CPU usage and MQTT spam
-                Thread.Sleep(1000);
+                // Wait for train completion signal or timeout (1 second)
+                // This allows immediate reprocessing when switches are released
+                _trainCompletedEvent.WaitOne(1000);
             }
 
             Console.WriteLine("[TrackHandlerService] Stopped");

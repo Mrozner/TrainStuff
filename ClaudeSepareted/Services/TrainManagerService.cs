@@ -8,6 +8,7 @@ using System.Xml.Linq;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.EntityFrameworkCore;
 using MQTTnet;
+using ClaudeSepareted.Domain;
 
 namespace ClaudeSepareted.Services
 {
@@ -20,10 +21,9 @@ namespace ClaudeSepareted.Services
         private readonly StatusNotificationService _statusService;
         private readonly IServiceProvider _serviceProvider;
         private readonly TrackHandlerService _trackHandlerService;
+        private readonly MqttInfrastructureService _mqttService;
         private readonly CancellationTokenSource _cancellationTokenSource;
         private volatile bool _isCompleted;
-        private IMqttClient? _mqttClient;
-        private bool _isInitialized = false;
         private string? _lastSpeedCommandSent = null;
         private string? _lastPowerCommandSent = null;
 
@@ -31,6 +31,10 @@ namespace ClaudeSepareted.Services
         private string? _destinationSectionName;
         private bool _destinationMonitoringActive = false;
         // No occupancy tracking needed - Rocrail only sends fb when sections are occupied
+
+        // Switch reservation fields
+        private readonly List<string> _reservedSwitches;
+        private readonly UnifiedPathfindingService _unifiedPathfinder;
 
         public bool IsCompleted => _isCompleted;
 
@@ -41,7 +45,10 @@ namespace ClaudeSepareted.Services
             MQTTConfiguration mqttConfig,
             StatusNotificationService statusService,
             IServiceProvider serviceProvider,
-            TrackHandlerService trackHandlerService = null)
+            MqttInfrastructureService mqttService,
+            TrackHandlerService trackHandlerService = null,
+            List<string> reservedSwitches = null,
+            UnifiedPathfindingService unifiedPathfinder = null)
         {
             _virtualClock = virtualClock ?? throw new ArgumentNullException(nameof(virtualClock));
             _train = train ?? throw new ArgumentNullException(nameof(train));
@@ -49,7 +56,10 @@ namespace ClaudeSepareted.Services
             _mqttConfig = mqttConfig ?? throw new ArgumentNullException(nameof(mqttConfig));
             _statusService = statusService ?? throw new ArgumentNullException(nameof(statusService));
             _serviceProvider = serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
+            _mqttService = mqttService ?? throw new ArgumentNullException(nameof(mqttService));
             _trackHandlerService = trackHandlerService;
+            _unifiedPathfinder = unifiedPathfinder;
+            _reservedSwitches = reservedSwitches ?? new List<string>();
             _cancellationTokenSource = new CancellationTokenSource();
             _isCompleted = false;
             _lastSpeedCommandSent = null; // Reset speed command history for new journey
@@ -94,6 +104,20 @@ namespace ClaudeSepareted.Services
                 _train.State = TrainState.Stopped;
 
                 Console.WriteLine($"[TrainManager-{_train.Name}] ✅ Train {_train.Name} stopped successfully");
+
+                // Release switches held by this train
+                if (_unifiedPathfinder != null)
+                {
+                    _unifiedPathfinder.ReleaseSwitches(_train.Name);
+                    Console.WriteLine($"[TrainManager-{_train.Name}] Released switches for {_train.Name}");
+                }
+
+                // Notify TrackHandlerService to reprocess waiting trains
+                if (_trackHandlerService != null)
+                {
+                    _trackHandlerService.OnTrainCompleted(_train.Name);
+                    Console.WriteLine($"[TrainManager-{_train.Name}] Notified TrackHandler that {_train.Name} completed");
+                }
                 _statusService?.ShowSuccess($"Megállt: {_train.Name}");
             }
             catch (Exception ex)
@@ -103,55 +127,15 @@ namespace ClaudeSepareted.Services
             }
         }
 
-        private async Task<bool> InitializeMqttAsync()
-        {
-            if (_isInitialized)
-                return true;
-
-            try
-            {
-                var factory = new MqttClientFactory();
-                _mqttClient = factory.CreateMqttClient();
-
-                var options = new MqttClientOptionsBuilder()
-                    .WithTcpServer(_mqttConfig.Address, _mqttConfig.Port)
-                    .WithCleanSession()
-                    .Build();
-
-                var result = await _mqttClient.ConnectAsync(options);
-
-                if (result.ResultCode == MqttClientConnectResultCode.Success)
-                {
-                    _isInitialized = true;
-                    Console.WriteLine($"[TrainManager-{_train.Name}] MQTT connected to {_mqttConfig.Address}:{_mqttConfig.Port}");
-                    return true;
-                }
-                else
-                {
-                    Console.WriteLine($"[TrainManager-{_train.Name}] MQTT connection failed: {result.ResultCode}");
-                    return false;
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[TrainManager-{_train.Name}] MQTT initialization error: {ex.Message}");
-                return false;
-            }
-        }
-
+        
         private async Task SendTrainCommandAsync(string command, Speed speed = Speed.STOP, bool direction = true)
         {
-            if (!_isInitialized || _mqttClient == null || !_mqttClient.IsConnected)
-            {
-                if (!await InitializeMqttAsync())
-                    return;
-            }
-
             try
             {
-                // Rocrail locomotive command format: <lc id="TrainName" v="speed" dir="true/false"/>
                 int speedValue = (int)speed;
-                var rocrailCommand = $"<lc id=\"{_train.Name}\" v=\"{speedValue}\" dir=\"{direction.ToString().ToLower()}\"/>";
+
+                // Use RocrailCommandFactory for XML generation
+                var rocrailCommand = RocrailCommandFactory.TrainVelocity(_train.Name, speedValue, direction);
 
                 // Check if this speed command is different from the last one sent (per-train check)
                 Console.WriteLine($"[TrainManager-{_train.Name}] Speed command check - Last: '{_lastSpeedCommandSent}', Current: '{rocrailCommand}'");
@@ -170,16 +154,18 @@ namespace ClaudeSepareted.Services
 
                 Console.WriteLine($"[TrainManager-{_train.Name}] Sending train speed command: {rocrailCommand}");
 
-                var mqttMessage = new MqttApplicationMessageBuilder()
-                    .WithTopic(_mqttConfig.TrainSpeedCommandTopic)
-                    .WithPayload(System.Text.Encoding.UTF8.GetBytes(rocrailCommand))
-                    .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce)
-                    .Build();
+                // Use centralized MQTT service
+                var success = await _mqttService.PublishAsync(_mqttConfig.TrainSpeedCommandTopic, rocrailCommand);
 
-                await _mqttClient.PublishAsync(mqttMessage);
-
-                // Store the speed command that was sent
-                _lastSpeedCommandSent = rocrailCommand;
+                if (success)
+                {
+                    // Store the speed command that was sent
+                    _lastSpeedCommandSent = rocrailCommand;
+                }
+                else
+                {
+                    Console.WriteLine($"[TrainManager-{_train.Name}] Failed to publish speed command via MQTT infrastructure");
+                }
             }
             catch (Exception ex)
             {
@@ -189,27 +175,24 @@ namespace ClaudeSepareted.Services
 
         private async Task SendSystemPowerCommandAsync()
         {
-            if (!_isInitialized || _mqttClient == null || !_mqttClient.IsConnected)
-            {
-                if (!await InitializeMqttAsync())
-                    return;
-            }
-
             try
             {
-                // Rocrail system power command: <sys cmd="go"/>
-                var powerCommand = "<sys cmd=\"go\"/>";
+                // Use RocrailCommandFactory for XML generation
+                var powerCommand = RocrailCommandFactory.SystemPower(true);
 
                 Console.WriteLine($"[TrainManager-{_train.Name}] Sending system power command: {powerCommand}");
 
-                var mqttMessage = new MqttApplicationMessageBuilder()
-                    .WithTopic(_mqttConfig.TrainSpeedCommandTopic)
-                    .WithPayload(System.Text.Encoding.UTF8.GetBytes(powerCommand))
-                    .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce)
-                    .Build();
+                // Use centralized MQTT service
+                var success = await _mqttService.PublishAsync(_mqttConfig.TrainSpeedCommandTopic, powerCommand);
 
-                await _mqttClient.PublishAsync(mqttMessage);
-                await Task.Delay(1000); // Wait for power to come on
+                if (success)
+                {
+                    await Task.Delay(1000); // Wait for power to come on
+                }
+                else
+                {
+                    Console.WriteLine($"[TrainManager-{_train.Name}] Failed to publish power command via MQTT infrastructure");
+                }
             }
             catch (Exception ex)
             {
@@ -245,89 +228,7 @@ namespace ClaudeSepareted.Services
             }
         }
 
-        private async Task<bool> InitializeMqttForFeedbackAsync()
-        {
-            if (_isInitialized && _mqttClient != null && _mqttClient.IsConnected)
-            {
-                try
-                {
-                    // Subscribe to feedback topic on existing connection (rocrail/service/info)
-                    await _mqttClient.SubscribeAsync(new MqttTopicFilterBuilder()
-                        .WithTopic("rocrail/service/info")
-                        .Build());
-
-                    // Set up message handler (add to existing handlers)
-                    _mqttClient.ApplicationMessageReceivedAsync += OnMqttMessageReceivedAsync;
-
-                    Console.WriteLine($"[TrainManager-{_train.Name}] MQTT feedback subscription added to existing connection (topic: rocrail/service/info)");
-                    return true;
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[TrainManager-{_train.Name}] Error adding feedback subscription: {ex.Message}");
-                    return false;
-                }
-            }
-
-            // Fallback to creating new connection if no existing connection
-            try
-            {
-                var factory = new MqttClientFactory();
-                var newMqttClient = factory.CreateMqttClient();
-
-                var options = new MqttClientOptionsBuilder()
-                    .WithTcpServer(_mqttConfig.Address, _mqttConfig.Port)
-                    .WithCleanSession()
-                    .Build();
-
-                var result = await newMqttClient.ConnectAsync(options);
-
-                if (result.ResultCode == MqttClientConnectResultCode.Success)
-                {
-                    _mqttClient = newMqttClient;
-                    _isInitialized = true;
-
-                    // Subscribe to feedback topic (rocrail/service/info)
-                    await _mqttClient.SubscribeAsync(new MqttTopicFilterBuilder()
-                        .WithTopic("rocrail/service/info")
-                        .Build());
-
-                    // Set up message handler
-                    _mqttClient.ApplicationMessageReceivedAsync += OnMqttMessageReceivedAsync;
-
-                    Console.WriteLine($"[TrainManager-{_train.Name}] MQTT feedback connected to {_mqttConfig.Address}:{_mqttConfig.Port} (topic: rocrail/service/info)");
-                    return true;
-                }
-                else
-                {
-                    Console.WriteLine($"[TrainManager-{_train.Name}] MQTT feedback connection failed: {result.ResultCode}");
-                    return false;
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[TrainManager-{_train.Name}] MQTT feedback initialization error: {ex.Message}");
-                return false;
-            }
-        }
-
-        private async Task OnMqttMessageReceivedAsync(MqttApplicationMessageReceivedEventArgs e)
-        {
-            try
-            {
-                if (e.ApplicationMessage.Topic == "rocrail/service/info")
-                {
-                    // Convert ReadOnlySequence<byte> to string (handle single segment case)
-                    var payload = System.Text.Encoding.UTF8.GetString(e.ApplicationMessage.Payload.First.Span);
-                    await ProcessRocrailFeedbackAsync(payload);
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[TrainManager-{_train.Name}] Error processing MQTT message: {ex.Message}");
-            }
-        }
-
+        
         private async Task ProcessRocrailFeedbackAsync(string feedbackMessage)
         {
             try
@@ -411,6 +312,20 @@ namespace ClaudeSepareted.Services
                                     _train.CurrentSpeed = Speed.STOP;
                                     _train.State = TrainState.Arrived;
                                     Console.WriteLine($"[TrainManager-{_train.Name}] ✅ Train stopped successfully at destination");
+
+                                    // Release switches held by this train
+                                    if (_unifiedPathfinder != null)
+                                    {
+                                        _unifiedPathfinder.ReleaseSwitches(_train.Name);
+                                        Console.WriteLine($"[TrainManager-{_train.Name}] Released switches for {_train.Name}");
+                                    }
+
+                                    // Notify TrackHandlerService to reprocess waiting trains
+                                    if (_trackHandlerService != null)
+                                    {
+                                        _trackHandlerService.OnTrainCompleted(_train.Name);
+                                        Console.WriteLine($"[TrainManager-{_train.Name}] Notified TrackHandler that {_train.Name} completed");
+                                    }
 
                                     // Save arrival record to database
                                     await SaveArrivalRecordAsync();
@@ -639,6 +554,20 @@ namespace ClaudeSepareted.Services
                 Console.WriteLine($"[TrainManager-{_train.Name}] ✅ Train {_train.Name} successfully stopped at destination");
                 _statusService?.ShowSuccess($"Megállt: {_train.Name} ( célállomáson)");
 
+                // Release switches held by this train
+                if (_unifiedPathfinder != null)
+                {
+                    _unifiedPathfinder.ReleaseSwitches(_train.Name);
+                    Console.WriteLine($"[TrainManager-{_train.Name}] Released switches for {_train.Name}");
+                }
+
+                // Notify TrackHandlerService to reprocess waiting trains
+                if (_trackHandlerService != null)
+                {
+                    _trackHandlerService.OnTrainCompleted(_train.Name);
+                    Console.WriteLine($"[TrainManager-{_train.Name}] Notified TrackHandler that {_train.Name} completed");
+                }
+
                 // Stop the train manager
                 _destinationMonitoringActive = false;
             }
@@ -651,16 +580,10 @@ namespace ClaudeSepareted.Services
 
         private async Task SendTrainPowerCommandAsync(bool powerOn)
         {
-            if (!_isInitialized || _mqttClient == null || !_mqttClient.IsConnected)
-            {
-                if (!await InitializeMqttAsync())
-                    return;
-            }
-
             try
             {
-                // Rocrail train power command: <lc id="TrainName" cmd="on"/> or <lc id="TrainName" cmd="off"/>
-                var powerCommand = $"<lc id=\"{_train.Name}\" cmd=\"{(powerOn ? "on" : "off")}\"/>";
+                // Use RocrailCommandFactory for XML generation
+                var powerCommand = RocrailCommandFactory.TrainPower(_train.Name, powerOn);
 
                 // Check if this power command is different from the last power command sent
                 Console.WriteLine($"[TrainManager-{_train.Name}] Power command check - Last: '{_lastPowerCommandSent}', Current: '{powerCommand}'");
@@ -681,18 +604,19 @@ namespace ClaudeSepareted.Services
 
                 Console.WriteLine($"[TrainManager-{_train.Name}] Sending train power command: {powerCommand}");
 
-                var mqttMessage = new MqttApplicationMessageBuilder()
-                    .WithTopic(_mqttConfig.TrainSpeedCommandTopic)
-                    .WithPayload(System.Text.Encoding.UTF8.GetBytes(powerCommand))
-                    .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce)
-                    .Build();
+                // Use centralized MQTT service
+                var success = await _mqttService.PublishAsync(_mqttConfig.TrainSpeedCommandTopic, powerCommand);
 
-                await _mqttClient.PublishAsync(mqttMessage);
-
-                // Store the power command that was sent
-                _lastPowerCommandSent = powerCommand;
-
-                await Task.Delay(500); // Wait for train power to change
+                if (success)
+                {
+                    // Store the power command that was sent
+                    _lastPowerCommandSent = powerCommand;
+                    await Task.Delay(500); // Wait for train power to change
+                }
+                else
+                {
+                    Console.WriteLine($"[TrainManager-{_train.Name}] Failed to publish power command via MQTT infrastructure");
+                }
             }
             catch (Exception ex)
             {
@@ -702,24 +626,25 @@ namespace ClaudeSepareted.Services
 
         private async void Run(CancellationToken cancellationToken)
         {
+            // Subscribe to the centralized feedback stream
+            Func<string, Task> feedbackHandler = async (payload) => await ProcessRocrailFeedbackAsync(payload);
+
             try
             {
                 Console.WriteLine($"[TrainManager-{_train.Name}] Starting journey management");
 
-                // Initialize MQTT for both train commands and feedback monitoring
-                if (!await InitializeMqttAsync())
+                _mqttService.OnRocrailFeedbackReceived += feedbackHandler;
+
+                // Ensure the centralized connection is ready
+                if (!await _mqttService.InitializeAsync())
                 {
-                    Console.WriteLine($"[TrainManager-{_train.Name}] MQTT initialization failed");
+                    Console.WriteLine($"[TrainManager-{_train.Name}] MQTT initialization failed via Infrastructure Service");
+                    _mqttService.OnRocrailFeedbackReceived -= feedbackHandler;
                     _isCompleted = true;
                     return;
                 }
 
-                if (!await InitializeMqttForFeedbackAsync())
-                {
-                    Console.WriteLine($"[TrainManager-{_train.Name}] MQTT feedback initialization failed");
-                    _isCompleted = true;
-                    return;
-                }
+                Console.WriteLine($"[TrainManager-{_train.Name}] Connected to centralized MQTT infrastructure");
 
                 // Calculate estimated journey duration (in virtual time)
                 // Extended duration to avoid frequent train completions and reduce database updates
@@ -875,6 +800,9 @@ namespace ClaudeSepareted.Services
             }
             finally
             {
+                // Clean up MQTT subscription
+                _mqttService.OnRocrailFeedbackReceived -= feedbackHandler;
+
                 // Only mark as completed if train hasn't arrived at destination
                 // This prevents destroying the manager after successful arrival
                 if (_train.State != TrainState.Arrived)

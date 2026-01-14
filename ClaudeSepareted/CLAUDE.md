@@ -116,6 +116,11 @@ dotnet add package <PackageName> --version <Version>
 
 **Key Directories:**
 - `/Common` - Shared data models and communication objects (MQTT messages, sensor data)
+  - `HallSensorData` - Hall sensor position data from track
+  - `RFIDSensorData` - RFID reader data for train identification
+  - `SignalRequest/Response` - Train signal operation messages
+  - `SignalStateChangeResponse` - Signal state change notifications
+  - `Constants` - System-wide constants
 - `/Configuration` - System configuration classes (MQTT, Track, Timetable settings)
 - `/Domain` - Entity Framework models (Train, Platforms, TrackConnections, etc.)
 - `/Services` - Business logic services (TrackHandler, TrainManager, VirtualClock)
@@ -123,6 +128,9 @@ dotnet add package <PackageName> --version <Version>
 - `/DataAccess` - EF Core DbContext and repository implementations
 - `/TrackHandler` - Complex track topology and routing logic
 - `/Enums` - Enumeration types (currently empty, available for future enum definitions)
+- `/Models` - UI-specific models and drawing helpers
+  - `ScheduleDrawable` - Custom drawing for timeline visualization
+  - `ScheduleItem` - Timetable entry display model
 
 ### Database Integration
 
@@ -158,7 +166,11 @@ dotnet add package <PackageName> --version <Version>
 - `TrackConnection` - Track topology connections
 - `VLookupSectionNextSection` - Navigation view
 - `VPlatformEntry` - Platform entry view
-- Multiple lookup tables for relationships and routing
+- `LookupSectionNextSection` - Section-to-section navigation lookup
+- `LookupSectionNextSectionSwitches` - Switch constraints for sections
+- `LookupSectionNextSectionDestinations` - Destination mapping for sections
+- `LookupSectionsSubSections` - Section to subsection mapping
+- `LookupSectionNextSectionNextSection` - Multi-section routing lookup
 
 ### MQTT Communication System
 
@@ -195,6 +207,19 @@ dotnet add package <PackageName> --version <Version>
 - Manages train speed and direction
 - Handles arrival/departure logic
 - Communicates with MQTT for hardware control
+- One instance per active train
+
+**TrainArrivalMonitorService** - Train arrival detection system
+- Monitors hall sensor data for train positioning
+- Detects train arrivals at platforms
+- Integrates with RFID data for train identification
+- Publishes arrival events to status notification service
+
+**MqttInfrastructureService** - Centralized MQTT communication
+- Single MQTT connection for entire application (shared by all services)
+- Publishes commands to Rocrail service topics
+- Subscribes to feedback topics (track status, sensor data)
+- Handles connection management and error recovery
 
 **VirtualClock** - Time simulation system
 - Accelerates/pauses simulation time
@@ -239,9 +264,11 @@ The application registers the following services in MauiProgram.cs:
 - `AdminMQTTService` - Admin MQTT communication
 - `StatusNotificationService` - Real-time status broadcasting
 - `VirtualClock` - Time simulation system
+- `MqttInfrastructureService` - Centralized MQTT connection management
 - `UnifiedPathfindingService` - Railway pathfinding algorithms
 - `ITrackGraphFactory` and `TrackGraphFactory` - Track graph creation
 - `TrackHandlerService` - Automated train scheduling
+- `TrainArrivalMonitorService` - Train arrival detection
 - `AdminPanelPage` - Admin control interface
 
 ## Key Development Notes
@@ -273,6 +300,52 @@ The build generates many CS8618 (non-nullable field) and CS8625 (null literal) w
 - Dictionary collections for managing active trains and commands
 - CancellationToken for service cancellation
 
+### Key Enumerations
+The system uses several important enumerations defined in `Domain/Enums.cs`:
+- `Speed`: STOP (0), SLOW (30), MEDIUM (60), HIGH (90) - train speed levels
+- `TrainState`: Waiting, Moving, Stopped, PrepareToStop, Arrived - train operational states
+- `EntryState`: Upcoming, InProgress, Arrived - timetable entry status
+- `RouteState`: InTime, Delay - schedule adherence status
+- `ObjectType`: Signal, Hall, RFID - railway object types for sensors
+
+### Rocrail Integration
+The system integrates with Rocrail model train software through:
+- `RocrailCommandFactory` (Domain/RocrailCommandFactory.cs) - Creates XML commands for Rocrail
+- MQTT topics for bidirectional communication with Rocrail server
+- Support for switches, signals, locomotives, and track feedback
+- Command deduplication to prevent duplicate MQTT messages
+
+**RocrailCommandFactory Usage:**
+```csharp
+// System power control
+RocrailCommandFactory.SystemPower(true);  // Power on
+RocrailCommandFactory.SystemPower(false); // Power off
+
+// Switch control
+RocrailCommandFactory.Switch("switch1", "straight"); // or "turn"
+
+// Signal control
+RocrailCommandFactory.Signal("sig1", "red"); // or "green", "yellow"
+
+// Train control with Speed enum
+RocrailCommandFactory.TrainVelocity("train1", Speed.MEDIUM, true); // forward
+RocrailCommandFactory.TrainVelocity("train1", Speed.STOP, false);  // reverse stop
+
+// Train power and mode
+RocrailCommandFactory.TrainPower("train1", true);
+RocrailCommandFactory.TrainMode("train1", true);  // auto mode
+```
+
+### TrackGraph System
+The `TrackGraph` class (Services/TrackGraph.cs) provides a graph-based representation of the railway network:
+- Loads track topology from database views and lookup tables
+- BFS (Breadth-First Search) pathfinding algorithm
+- Platform-to-node mapping for station routing
+- Switch configuration calculation for routes
+- Handles bidirectional track navigation
+- Edge validation to prevent invalid paths
+- Used by UnifiedPathfindingService for route calculations
+
 ## Working with This Codebase
 
 ### When Adding New Features:
@@ -299,12 +372,16 @@ The build generates many CS8618 (non-nullable field) and CS8625 (null literal) w
 - Update ApplicationDbContext.cs with new DbSets for new entities
 
 ### Pathfinding System Usage:
-The project includes a sophisticated pathfinding system documented in `PATHFINDING_USAGE_EXAMPLE.md`:
-- Use `UnifiedPathfindingService` for train routing calculations
+The project uses `UnifiedPathfindingService` for train routing calculations:
 - Access through dependency injection in services
 - Supports BFS-based pathfinding with conflict detection
 - Provides required switch configurations for routes
 - Integrates with TrackHandlerService for automated routing
+- Uses `TrackGraph` class for graph-based railway network representation
+- Uses `ITrackGraphFactory` to create track graph instances
+- See `FindRouteBFS_Issues_Analysis.md` for debugging pathfinding issues
+
+**Note**: The `PATHFINDING_USAGE_EXAMPLE.md` file mentions `RailwayPathfinderService` and `TrainPathfinderIntegration`, but the actual codebase uses `UnifiedPathfindingService` instead.
 
 ### Platform-Specific Development:
 - **Android**: Requires Android SDK and Android Workload
@@ -314,6 +391,12 @@ The project includes a sophisticated pathfinding system documented in `PATHFINDI
 - Use platform-specific folders for native implementations
 
 This system is designed for real-time railway operations management and requires careful consideration of timing, concurrency, and hardware integration aspects.
+
+### Code Language Notes
+- The codebase contains mixed English and Hungarian (Magyar) comments and variable names
+- Example: `// Regisztráljuk a DbContext-et` translates to "Register the DbContext"
+- Platform names and station names often use Hungarian characters (é, á, ű, etc.)
+- Be aware of character encoding when working with station names and database queries
 
 ## Common Development Workflows
 
@@ -374,3 +457,20 @@ dotnet-ef database update --project .
 - Check VirtualClock timing for schedule-related problems
 - Use Admin Panel for manual system control during debugging
 - Monitor console output for pathfinding and routing debug information
+
+### Pathfinding Debugging
+When pathfinding fails (returns null routes), check:
+1. Graph connectivity - verify `V_Lookup_Section_NextSection` view has data
+2. Platform mapping - ensure platform names match database format (watch for Hungarian characters: é, á, ű, etc.)
+3. Node validation - verify source and destination nodes exist in graph
+4. Edge loading - check if edges were loaded from database connections
+5. Direction mismatch - verify direction parameter (true/false) matches database expectations
+
+Refer to `FindRouteBFS_Issues_Analysis.md` for detailed debugging steps and probable fixes.
+
+### Hungarian Character Handling
+The system handles Hungarian station names with special characters (é, á, ű, etc.):
+- Platform name normalization in TrackGraph for matching
+- Case-insensitive platform key generation
+- Special character handling in database queries
+- Be aware of character encoding when working with station names

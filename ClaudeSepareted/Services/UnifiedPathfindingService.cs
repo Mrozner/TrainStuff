@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -26,6 +27,10 @@ namespace ClaudeSepareted.Services
         private bool _isInitialized = false;
         private readonly object _lockObject = new object();
         private readonly Dictionary<string, string> _lastSwitchStates = new Dictionary<string, string>();
+
+        // Switch locking mechanism to prevent conflicts between multiple trains
+        private readonly ConcurrentDictionary<string, string> _lockedSwitches = new ConcurrentDictionary<string, string>();
+        private readonly object _switchLockObject = new object();
 
         public UnifiedPathfindingService(
             ApplicationDbContext dbContext,
@@ -530,7 +535,8 @@ namespace ClaudeSepareted.Services
             Platforms sourcePlatform,
             Platforms destinationPlatform,
             string trainName = "Unknown",
-            bool direction = true)
+            bool direction = true,
+            bool configureSwitches = true)
         {
             if (!_isInitialized)
             {
@@ -581,6 +587,18 @@ namespace ClaudeSepareted.Services
 
                 // Convert to RoutePlan format
                 var routePlan = ConvertToRoutePlan(routeSections);
+
+                // If we only want to plan/reserve but NOT move switches yet:
+                if (!configureSwitches)
+                {
+                    var requiredSwitches = await GetRequiredSwitchesForRouteAsync(routePlan);
+                    return new RoutePlanResult
+                    {
+                        Success = true,
+                        RoutePlan = routePlan,
+                        ConfiguredSwitches = requiredSwitches.Select(s => new SwitchConfiguration(s.SwitchName, s.RequiredPosition)).ToList()
+                    };
+                }
 
                 // Configure switches for the route
                 var switchConfigResult = await ConfigureSwitchesForRouteAsync(routePlan, trainName);
@@ -725,6 +743,54 @@ namespace ClaudeSepareted.Services
         }
 
         #endregion
+
+        /// <summary>
+        /// Attempts to reserve a list of switches for a specific train.
+        /// Returns true if all switches were successfully locked.
+        /// Returns false if ANY switch was already locked by a different train.
+        /// </summary>
+        public bool TryReserveSwitches(List<string> switchNames, string trainName)
+        {
+            if (switchNames == null || !switchNames.Any()) return true;
+
+            lock (_switchLockObject)
+            {
+                // 1. Check if ANY required switch is already locked by ANOTHER train
+                foreach (var sw in switchNames)
+                {
+                    if (_lockedSwitches.TryGetValue(sw, out var owner) && owner != trainName)
+                    {
+                        Console.WriteLine($"[UnifiedPathfinder] Switch {sw} is already locked by {owner}. Request by {trainName} denied.");
+                        return false;
+                    }
+                }
+
+                // 2. If clear, lock ALL switches for this train
+                foreach (var sw in switchNames)
+                {
+                    _lockedSwitches[sw] = trainName;
+                }
+
+                Console.WriteLine($"[UnifiedPathfinder] Reserved {switchNames.Count} switches for {trainName}");
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Releases all switch locks held by the specified train.
+        /// </summary>
+        public void ReleaseSwitches(string trainName)
+        {
+            lock (_switchLockObject)
+            {
+                var switchesToRemove = _lockedSwitches.Where(kvp => kvp.Value == trainName).Select(kvp => kvp.Key).ToList();
+                foreach (var sw in switchesToRemove)
+                {
+                    _lockedSwitches.TryRemove(sw, out _);
+                }
+                Console.WriteLine($"[UnifiedPathfinder] Released {switchesToRemove.Count} switches for {trainName}");
+            }
+        }
 
         #region Utility Methods
 
