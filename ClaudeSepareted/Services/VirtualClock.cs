@@ -1,68 +1,115 @@
 using System;
+using System.Diagnostics;
 
 namespace ClaudeSepareted
 {
-    public class VirtualClock
+    public class VirtualClock : IDisposable
     {
+        // Phase 1: Add lock object for thread safety
+        private readonly object _lock = new();
         private DateTime _virtualTime;
-        private DateTime _startTime;
+        private long _lastUpdateTimestamp;
+        private long _accumulatedVirtualTicks = 0;
         private double _speedMultiplier;
         private readonly Timer _updateTimer;
-        private bool _midnightTriggered = false;
+        private volatile bool _disposed = false;
+        private bool _isPaused = true; // Default to true since timer starts suspended
+        private double _previousSpeedMultiplier = 60.0; // Store for resume
+        private readonly Services.FileLoggingService? _fileLogger;
 
         public event EventHandler<DateTime>? TimeChanged;
         public event EventHandler? MidnightReset;
 
-        public DateTime CurrentTime => _virtualTime;
-        public double SpeedMultiplier => _speedMultiplier;
+        // Phase 1: Thread-safe property
+        public DateTime CurrentTime { get { lock (_lock) return _virtualTime; } }
+        public double SpeedMultiplier { get { lock (_lock) return _speedMultiplier; } }
 
-        public VirtualClock()
+        public VirtualClock(Services.FileLoggingService fileLogger = null)
         {
+            _fileLogger = fileLogger;
             _virtualTime = new DateTime(2024, 1, 1, 0, 0, 0); // Default 0:00 (midnight)
-            _startTime = DateTime.Now;
+            _lastUpdateTimestamp = Stopwatch.GetTimestamp();
             _speedMultiplier = 60.0; // Default 60x speed
+            _previousSpeedMultiplier = 60.0;
 
-            // Don't start the timer immediately - keep it at midnight until explicitly started
+            // Phase 4: Start as one-shot timer
             _updateTimer = new Timer(UpdateVirtualTime, null, Timeout.Infinite, Timeout.Infinite);
+        }
+
+        /// <summary>
+        /// Accumulate elapsed real time into virtual ticks based on current speed multiplier.
+        /// This must be called before any operation that affects time calculation.
+        /// If paused, only updates the timestamp without accumulating time.
+        /// Phase 2: Single timestamp capture to prevent drift.
+        /// </summary>
+        private void AccumulateTime()
+        {
+            // Phase 2: Single capture to prevent drift
+            long now = Stopwatch.GetTimestamp();
+
+            if (_isPaused)
+            {
+                _lastUpdateTimestamp = now;
+                return;
+            }
+
+            var elapsedRealTime = Stopwatch.GetElapsedTime(_lastUpdateTimestamp, now);
+            var virtualTicksToAdd = (long)(elapsedRealTime.Ticks * _speedMultiplier);
+            _accumulatedVirtualTicks += virtualTicksToAdd;
+            _lastUpdateTimestamp = now;
         }
 
         public void Start()
         {
-            // Reset the start time to now and begin the timer
-            _startTime = DateTime.Now;
-            _updateTimer.Change(TimeSpan.Zero, TimeSpan.FromMilliseconds(100));
-            Console.WriteLine("[VirtualClock] Started - beginning time progression from 00:00:00");
+            lock (_lock)
+            {
+                // Reset the last update timestamp to now and begin the timer
+                _lastUpdateTimestamp = Stopwatch.GetTimestamp();
+                _isPaused = false; // Mark as running
+                // Phase 4: One-shot pattern
+                _updateTimer.Change(0, Timeout.Infinite);
+            }
         }
 
         private void UpdateVirtualTime(object? state)
         {
-            var elapsedRealTime = DateTime.Now - _startTime;
-            var elapsedVirtualTime = TimeSpan.FromTicks((long)(elapsedRealTime.Ticks * _speedMultiplier));
+            if (_disposed) return;
 
-            var newVirtualTime = new DateTime(2024, 1, 1, 0, 0, 0).Add(elapsedVirtualTime);
+            DateTime oldTime;
+            DateTime newTime;
+            bool triggerMidnight = false;
 
-            if (newVirtualTime.Date != _virtualTime.Date)
+            // Phase 1: Lock for thread safety
+            lock (_lock)
             {
-                // Reset to same day if we've passed midnight
-                _startTime = DateTime.Now;
-                newVirtualTime = new DateTime(2024, 1, 1, 0, 0, 0);
+                AccumulateTime();
+                oldTime = _virtualTime;
 
-                // Trigger midnight reset event once per day
-                if (!_midnightTriggered)
-                {
-                    _midnightTriggered = true;
-                    MidnightReset?.Invoke(this, EventArgs.Empty);
-                    Console.WriteLine("[VirtualClock] Midnight reset triggered - all timetable entries reset to Upcoming");
-                }
+                // Phase 3: 24-hour wrap logic using modulo
+                const long ticksPerDay = TimeSpan.TicksPerDay;
+                _accumulatedVirtualTicks %= ticksPerDay;
+
+                newTime = new DateTime(2024, 1, 1).AddTicks(_accumulatedVirtualTicks);
+                _virtualTime = newTime;
+
+                // Phase 3: State-based midnight trigger (detect wraparound)
+                if (newTime.TimeOfDay < oldTime.TimeOfDay)
+                    triggerMidnight = true;
             }
-            else if (newVirtualTime.TimeOfDay > TimeSpan.FromHours(1))
+
+            // Fire events outside the lock to prevent deadlocks
+            if (triggerMidnight)
+                MidnightReset?.Invoke(this, EventArgs.Empty);
+
+            if (!_disposed)
+                TimeChanged?.Invoke(this, newTime);
+
+            // Phase 4: Reschedule next tick using one-shot pattern
+            lock (_lock)
             {
-                // Reset the midnight trigger after 1:00 AM to allow next day's reset
-                _midnightTriggered = false;
+                if (!_disposed && !_isPaused)
+                    _updateTimer.Change(100, Timeout.Infinite);
             }
-
-            _virtualTime = newVirtualTime;
-            TimeChanged?.Invoke(this, _virtualTime);
         }
 
         public void SetSpeed(double multiplier)
@@ -70,20 +117,33 @@ namespace ClaudeSepareted
             if (multiplier <= 0)
                 throw new ArgumentException("Speed multiplier must be greater than 0", nameof(multiplier));
 
-            // Adjust start time to maintain current virtual time when speed changes
-            var elapsedRealTime = DateTime.Now - _startTime;
-            var elapsedVirtualTime = TimeSpan.FromTicks((long)(elapsedRealTime.Ticks * _speedMultiplier));
+            lock (_lock)
+            {
+                // Lock in elapsed time at current speed before changing
+                AccumulateTime();
 
-            _speedMultiplier = multiplier;
-            _startTime = DateTime.Now - TimeSpan.FromTicks((long)(elapsedVirtualTime.Ticks / _speedMultiplier));
+                // Store current speed for potential resume
+                _previousSpeedMultiplier = multiplier;
+
+                // Update speed multiplier for future calculations
+                _speedMultiplier = multiplier;
+
+                _fileLogger?.Log($"[VIRTUAL CLOCK] Speed multiplier changed from {_previousSpeedMultiplier}x to {multiplier}x.");
+            }
         }
 
         public void SetTime(DateTime newTime)
         {
-            _virtualTime = new DateTime(2024, 1, 1, newTime.Hour, newTime.Minute, newTime.Second);
-            // Adjust start time so the timer calculates to the desired time
-            var targetTimeOfDay = newTime.TimeOfDay;
-            _startTime = DateTime.Now - TimeSpan.FromTicks((long)(targetTimeOfDay.Ticks / _speedMultiplier));
+            lock (_lock)
+            {
+                // Set accumulated ticks to the target time of day
+                _accumulatedVirtualTicks = newTime.TimeOfDay.Ticks;
+                _virtualTime = new DateTime(2024, 1, 1, newTime.Hour, newTime.Minute, newTime.Second);
+                // Reset last update timestamp to establish a fresh baseline
+                _lastUpdateTimestamp = Stopwatch.GetTimestamp();
+
+                _fileLogger?.Log($"[VIRTUAL CLOCK] Time explicitly set to {newTime:HH:mm:ss}.");
+            }
         }
 
         public void Reset()
@@ -94,22 +154,62 @@ namespace ClaudeSepareted
 
         public void Pause()
         {
-            SetSpeed(0.0001); // Nearly stopped but still running to avoid timer issues
+            lock (_lock)
+            {
+                // First, lock in elapsed time before pausing
+                AccumulateTime();
+                // Mark as paused to prevent time accumulation during timer callbacks
+                _isPaused = true;
+                // Phase 4: Suspend the timer completely
+                _updateTimer.Change(Timeout.Infinite, Timeout.Infinite);
+
+                _fileLogger?.Log("[VIRTUAL CLOCK] Clock paused.");
+            }
         }
 
         public void Resume()
         {
-            SetSpeed(60.0); // Back to default speed
-        }
+            lock (_lock)
+            {
+                // Establish a fresh baseline timestamp to prevent time jumps
+                _lastUpdateTimestamp = Stopwatch.GetTimestamp();
 
-        public void ResetMidnightTrigger()
-        {
-            _midnightTriggered = false;
+                // Restore the speed multiplier to previous value (or default)
+                _speedMultiplier = _previousSpeedMultiplier;
+
+                // Mark as running to allow time accumulation
+                _isPaused = false;
+
+                // Phase 4: Restart timer using one-shot pattern
+                _updateTimer.Change(0, Timeout.Infinite);
+
+                _fileLogger?.Log("[VIRTUAL CLOCK] Clock resumed.");
+            }
         }
 
         public void Dispose()
         {
-            _updateTimer?.Dispose();
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (!_disposed)
+            {
+                if (disposing)
+                {
+                    // Stop the timer and dispose it
+                    _updateTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+                    _updateTimer?.Dispose();
+
+                    // Unsubscribe all events to prevent memory leaks
+                    TimeChanged = null;
+                    MidnightReset = null;
+                }
+
+                _disposed = true;
+            }
         }
 
     }

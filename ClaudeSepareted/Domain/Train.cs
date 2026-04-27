@@ -13,7 +13,7 @@ namespace ClaudeSepareted
         public int Platform_DB_ID { get; set; }
         public Speed MaxSpeed { get; set; }
         [NotMapped]
-        public Speed CurrentSpeed { get; set; } = Speed.STOP;
+        public Speed CurrentSpeed { get; set; } = Speed.ZERO;
         [NotMapped]
         public TrainState State { get; set; } = TrainState.Waiting;
 

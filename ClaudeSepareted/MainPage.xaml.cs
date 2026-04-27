@@ -3,70 +3,116 @@ using System;
 using System.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using ClaudeSepareted.Services;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ClaudeSepareted
 {
     public partial class MainPage : ContentPage
     {
         private readonly MainPageViewModel _viewModel;
-        private readonly ApplicationDbContext _dbContext;
+        private readonly IDbContextFactory<ApplicationDbContext> _dbContextFactory;
         private readonly TrackHandlerService _trackHandlerService;
         private readonly VirtualClock _virtualClock;
         private readonly StatusNotificationService _statusNotificationService;
+        private readonly PathfindingService _pathfindingService;
+        private readonly IServiceProvider _serviceProvider;
         private bool _automatedServicesInitialized = false;
 
-        public MainPage(MainPageViewModel viewModel, ApplicationDbContext dbContext,
+        public MainPage(MainPageViewModel viewModel, IDbContextFactory<ApplicationDbContext> dbContextFactory,
                        TrackHandlerService trackHandlerService, VirtualClock virtualClock,
-                       StatusNotificationService statusNotificationService)
+                       StatusNotificationService statusNotificationService,
+                       PathfindingService pathfindingService,
+                       IServiceProvider serviceProvider)
         {
             InitializeComponent();
             _viewModel = viewModel;
-            _dbContext = dbContext;
+            _dbContextFactory = dbContextFactory;
             _trackHandlerService = trackHandlerService;
             _virtualClock = virtualClock;
             _statusNotificationService = statusNotificationService;
+            _pathfindingService = pathfindingService;
+            _serviceProvider = serviceProvider;
             BindingContext = _viewModel;
         }
 
-        protected override void OnAppearing()
+        protected override async void OnAppearing()
         {
             base.OnAppearing();
 
-            // Initialize automated services if not already done
             if (!_automatedServicesInitialized)
             {
-                InitializeAutomatedServices();
+                await InitializeAutomatedServicesAsync();
                 _automatedServicesInitialized = true;
             }
 
-            _ = _viewModel.LoadDataAsync();
-        }
-
-        private void InitializeAutomatedServices()
-        {
+            // Always reload data when the page appears
             try
             {
-                Console.WriteLine("=== Initializing Automated Train Scheduling Services ===");
-
-                // Configure virtual clock
-                _virtualClock.SetSpeed(60.0); // 60x speed (default from your config)
-                _virtualClock.SetTime(new DateTime(2024, 1, 1, 0, 0, 0)); // Start at 00:00 (midnight)
-
-                Console.WriteLine("Virtual Clock configured:");
-                Console.WriteLine($"  - Speed: {_virtualClock.SpeedMultiplier}x");
-                Console.WriteLine($"  - Start Time: {_virtualClock.CurrentTime:HH:mm:ss}");
-
-                // Start Track Handler Service
-                _trackHandlerService.Start();
-                Console.WriteLine("Track Handler Service started");
-
-                _statusNotificationService?.ShowSuccess("Automatizált vonatkezelő rendszer sikeresen elindítva");
-                Console.WriteLine("=== Automated Train Scheduling System is now running ===");
+                await _viewModel.LoadDataAsync();
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"FATAL ERROR initializing automated services: {ex.Message}");
-                Console.WriteLine($"Stack trace: {ex.StackTrace}");
+                System.Diagnostics.Debug.WriteLine($"Error loading data: {ex.Message}");
+                _statusNotificationService?.ShowError($"Hiba történt: {ex.Message}");
+            }
+        }
+
+        private async System.Threading.Tasks.Task InitializeAutomatedServicesAsync()
+        {
+            try
+            {
+                // Step 1: Initialize Pathfinding Service and build routing table
+                var pathfindingInitStart = DateTime.Now;
+                var pathfindingSuccess = await _pathfindingService.InitializeAsync();
+                var pathfindingDuration = (DateTime.Now - pathfindingInitStart).TotalSeconds;
+
+                if (pathfindingSuccess)
+                {
+                    // Routing table built successfully
+                }
+                else
+                {
+                    _statusNotificationService?.ShowError("Pathfinding service initialization failed");
+                    return; // Don't continue if pathfinding failed
+                }
+
+                // Step 2: Configure virtual clock
+                _virtualClock.SetSpeed(60.0); // 60x speed (default from your config)
+                _virtualClock.SetTime(new DateTime(2024, 1, 1, 0, 0, 0)); // Start at 00:00 (midnight)
+
+                // Step 3: Start Track Handler Service
+                _trackHandlerService.Start();
+
+                var totalDuration = (DateTime.Now - pathfindingInitStart).TotalSeconds;
+                _statusNotificationService?.ShowSuccess($"Automatizált rendszer elindítva ({totalDuration:F0}s)");
+
+                // Launch the Status Monitor safely on the Main UI Thread
+                // MAUI WinUI 3 Fix: We must wait for the main window to fully render
+                // before asking the OS to spawn a second window handle.
+                MainThread.BeginInvokeOnMainThread(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(1500); // 1.5 second UI breather
+
+                        var adminPage = _serviceProvider.GetRequiredService<AdminPanelPage>();
+                        var statusWindow = new Window(adminPage)
+                        {
+                            Title = "System Status Monitor",
+                            Width = 600,
+                            Height = 800
+                        };
+                        Application.Current?.OpenWindow(statusWindow);
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"Failed to open status window: {ex.Message}");
+                        _statusNotificationService?.ShowError($"Nem sikerült megnyitni a státusz ablakot: {ex.Message}");
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
                 _statusNotificationService?.ShowError($"Automatizált rendszer indítása sikertelen: {ex.Message}");
             }
         }
@@ -75,27 +121,26 @@ namespace ClaudeSepareted
         {
             // 1. A bemeneti adatok kinyerése a felhasználói felületről (feltételezett UI elemek nevei)
             var selectedTrain = TrainPicker.SelectedItem as Train;
-            var selectedSourcePlatformItem = StartPicker.SelectedItem as PlatformDisplayItem;
-            var selectedDestinationPlatformItem = EndPicker.SelectedItem as PlatformDisplayItem;
+            var selectedStartPlatform = StartPicker.SelectedItem as Platforms;
+            var selectedEndPlatform = EndPicker.SelectedItem as Platforms;
 
             // 2. Ellenőrzés, hogy a felhasználó választott-e ki valamit
-            if (selectedTrain == null || selectedSourcePlatformItem == null || selectedDestinationPlatformItem == null)
+            if (selectedTrain == null || selectedStartPlatform == null || selectedEndPlatform == null)
             {
-                await DisplayAlert("Hiba", "Kérjük, válasszon vonatot, indulási peront és célperont.", "OK");
+                await DisplayAlert("Hiba", "Kérjük, válasszon vonatot, indulási peront és cél peront.", "OK");
                 return;
             }
 
-            // Extract the actual platform objects
-            var selectedSourcePlatform = selectedSourcePlatformItem.Platform;
-            var selectedDestinationPlatform = selectedDestinationPlatformItem.Platform;
             var startTime = StartTimePicker.Time ?? TimeSpan.Zero;
 
             try
             {
+                using var dbContext = await _dbContextFactory.CreateDbContextAsync();
+
                 var newEntry = new TimetableEntries
                 {
-                    SourcePlatform_DB_ID = selectedSourcePlatform.DB_ID,
-                    DestinationPlatform_DB_ID = selectedDestinationPlatform.DB_ID,
+                    SourcePlatform_DB_ID = selectedStartPlatform.DB_ID,
+                    DestinationPlatform_DB_ID = selectedEndPlatform.DB_ID,
                     Train_DB_ID = selectedTrain.DB_ID,
 
                     StartDate = DateTime.Today,
@@ -104,8 +149,8 @@ namespace ClaudeSepareted
                     RouteState = RouteState.InTime
                 };
 
-                _dbContext.TimetableEntries.Add(newEntry);
-                int rowsAffected = await _dbContext.SaveChangesAsync();
+                dbContext.TimetableEntries.Add(newEntry);
+                int rowsAffected = await dbContext.SaveChangesAsync();
                 await _viewModel.LoadDataAsync();
 
                 if (rowsAffected > 0)
@@ -138,18 +183,22 @@ namespace ClaudeSepareted
 
                 try
                 {
-                    // Megkeressük az adatbázisban a megfelelő bejegyzést
-                    var entryToDelete = await _dbContext.TimetableEntries
+                    using var dbContext = await _dbContextFactory.CreateDbContextAsync();
+
+                    // 1. Fetch potential matches from SQL Server without using [NotMapped] properties
+                    var potentialEntries = await dbContext.TimetableEntries
                         .Include(e => e.Train)
                         .Include(e => e.SourcePlatform)
-                            .ThenInclude(sp => sp.Station)
+                            .ThenInclude(p => p.Station)
                         .Include(e => e.DestinationPlatform)
-                            .ThenInclude(dp => dp.Station)
-                        .FirstOrDefaultAsync(e =>
-                            e.Train.Name == scheduleItem.TrainName &&
-                            e.SourcePlatform.Name == scheduleItem.FromPlatform &&
-                            e.DestinationPlatform.Name == scheduleItem.ToPlatform &&
-                            e.StartTime == scheduleItem.Start);
+                            .ThenInclude(p => p.Station)
+                        .Where(e => e.Train.Name == scheduleItem.TrainName && e.StartTime == scheduleItem.Start)
+                        .ToListAsync();
+
+                    // 2. Filter in C# memory where DisplayName can be evaluated safely
+                    var entryToDelete = potentialEntries.FirstOrDefault(e =>
+                        e.SourcePlatform?.DisplayName == scheduleItem.From &&
+                        e.DestinationPlatform?.DisplayName == scheduleItem.To);
 
                     if (entryToDelete == null)
                     {
@@ -157,8 +206,8 @@ namespace ClaudeSepareted
                         return;
                     }
 
-                    _dbContext.TimetableEntries.Remove(entryToDelete);
-                    int rowsAffected = await _dbContext.SaveChangesAsync();
+                    dbContext.TimetableEntries.Remove(entryToDelete);
+                    int rowsAffected = await dbContext.SaveChangesAsync();
                     await _viewModel.LoadDataAsync();
 
                     if (rowsAffected > 0)
@@ -183,19 +232,6 @@ namespace ClaudeSepareted
         }
 
 
-
-        private async void AdminPanel(object sender, EventArgs e)
-        {
-            try
-            {
-                var adminPage = Handler.MauiContext.Services.GetRequiredService<AdminPanelPage>();
-                await Navigation.PushAsync(adminPage);
-            }
-            catch (Exception ex)
-            {
-                await DisplayAlert("Hiba", $"Nem sikerült megnyitni az admin panelt: {ex.Message}", "OK");
-            }
-        }
 
         private void OnSetVirtualTime(object sender, EventArgs e)
         {
@@ -265,35 +301,6 @@ namespace ClaudeSepareted
             catch (Exception ex)
             {
                 DisplayAlert("Error", $"Failed to reset clock: {ex.Message}", "OK");
-            }
-        }
-
-        protected override void OnDisappearing()
-        {
-            base.OnDisappearing();
-
-            // Stop automated services when page is closed
-            if (_automatedServicesInitialized)
-            {
-                try
-                {
-                    Console.WriteLine("=== Shutting down Automated Train Scheduling Services ===");
-
-                    // Stop Track Handler Service
-                    _trackHandlerService?.Stop();
-                    Console.WriteLine("Track Handler Service stopped");
-
-                    // Pause Virtual Clock
-                    _virtualClock?.Pause();
-                    Console.WriteLine("Virtual Clock paused");
-
-                    _statusNotificationService?.ShowInfo("Automatizált rendszer leállítva");
-                    Console.WriteLine("=== All automated services have been stopped ===");
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"ERROR shutting down automated services: {ex.Message}");
-                }
             }
         }
 

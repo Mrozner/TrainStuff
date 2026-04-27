@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using ClaudeSepareted.Domain;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace ClaudeSepareted.Services
 {
@@ -15,26 +16,26 @@ namespace ClaudeSepareted.Services
         private readonly Dictionary<int, List<TrackEdge>> _edges;
         private readonly Dictionary<string, int> _stationToNodeId;
         private readonly Dictionary<string, int> _platformToNodeId;
+        private readonly Dictionary<string, int> _nameToNodeId;
 
         public TrackGraph()
         {
             _nodes = new Dictionary<int, TrackNode>();
             _edges = new Dictionary<int, List<TrackEdge>>();
-            _stationToNodeId = new Dictionary<string, int>();
-            _platformToNodeId = new Dictionary<string, int>();
+            _stationToNodeId = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            _platformToNodeId = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            _nameToNodeId = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         }
 
         /// <summary>
         /// Loads the track graph from the database using Lookup_Section_NextSection tables
         /// </summary>
-        public static async Task<TrackGraph> LoadFromDatabaseAsync(ApplicationDbContext dbContext)
+        public static async Task<TrackGraph> LoadFromDatabaseAsync(ApplicationDbContext dbContext, ILogger<TrackGraph> logger = null, FileLoggingService fileLogger = null)
         {
             var graph = new TrackGraph();
 
             try
             {
-                Console.WriteLine("[TrackGraph] Loading track layout from database using Lookup tables...");
-
                 // Load all subsections as nodes
                 var subsections = await dbContext.SubSections.ToListAsync();
                 foreach (var subsection in subsections)
@@ -49,44 +50,30 @@ namespace ClaudeSepareted.Services
                     .Where(p => p.IsActive)
                     .ToListAsync();
 
-                Console.WriteLine($"[TrackGraph] Loading {platforms.Count} platforms for station and platform mapping...");
-
                 foreach (var platform in platforms)
                 {
-                    Console.WriteLine($"[TrackGraph] Processing platform: {platform.Station?.Name}-{platform.Name} -> SubSection {platform.SubSection?.DB_ID} ({platform.SubSection?.Name})");
-
                     if (platform.SubSection != null)
                     {
                         // Map station to subsection if not already mapped
                         if (platform.Station != null && !graph._stationToNodeId.ContainsKey(platform.Station.Name))
                         {
                             graph.MapStationToNode(platform.Station.Name, platform.SubSection.DB_ID);
-                            Console.WriteLine($"[TrackGraph] Mapped station '{platform.Station.Name}' to node {platform.SubSection.DB_ID}");
                         }
 
                         // Map platform to subsection for platform-level routing
                         graph.MapPlatformToNode(platform.Station?.Name, platform.Name, platform.SubSection.DB_ID);
-                        var platformDisplayName = $"{platform.Station?.Name ?? "Unknown"}-{platform.Name ?? "Unknown"}";
-                        Console.WriteLine($"[TrackGraph] ✓ Mapped platform '{platformDisplayName}' to subsection {platform.SubSection.DB_ID} ({platform.SubSection.Name})");
-                    }
-                    else
-                    {
-                        Console.WriteLine($"[TrackGraph] ⚠ Platform '{platform.Station?.Name}-{platform.Name}' has no SubSection mapping (SubSection_DB_ID: {platform.SubSection_DB_ID})");
                     }
                 }
 
                 // Load connections from Lookup_Section_NextSection using raw SQL since this table might not be mapped in EF
-                await LoadConnectionsFromLookupTables(dbContext, graph);
+                await LoadConnectionsFromLookupTables(dbContext, graph, logger, fileLogger);
 
-                Console.WriteLine($"[TrackGraph] Track graph loaded: {graph._nodes.Count} nodes, {graph._edges.Values.Sum(e => e.Count)} edges");
-                Console.WriteLine($"[TrackGraph] Station mappings: {graph._stationToNodeId.Count}");
-                Console.WriteLine($"[TrackGraph] Platform mappings: {graph._platformToNodeId.Count}");
-
+                fileLogger?.Log($"[TRACK GRAPH] Topology built from database: {graph._nodes.Count} nodes loaded.");
                 return graph;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[TrackGraph] Error loading track graph: {ex.Message}");
+                logger?.LogError(ex, "Failed to load track graph from database");
                 throw;
             }
         }
@@ -94,93 +81,52 @@ namespace ClaudeSepareted.Services
         /// <summary>
         /// Loads track connections from Lookup_Section_NextSection tables
         /// </summary>
-        private static async Task LoadConnectionsFromLookupTables(ApplicationDbContext dbContext, TrackGraph graph)
+        private static async Task LoadConnectionsFromLookupTables(ApplicationDbContext dbContext, TrackGraph graph, ILogger<TrackGraph> logger = null, FileLoggingService fileLogger = null)
         {
             try
             {
-                Console.WriteLine("[TrackGraph] Loading connections from base Lookup tables...");
-
-                // Load all connections from Lookup_Section_NextSection (both directions)
-                var allConnections = await dbContext.LookupSectionNextSection
-                    .Where(ls => ls.IsActive && ls.NextSection_DB_ID.HasValue)
+                // Load enhanced connections with switch constraints from the view
+                // This is CRITICAL for safety - if this view is missing, we MUST fail fast
+                // to prevent operating trains without proper switch constraint enforcement
+                var viewConnections = await dbContext.VLookupSectionNextSection
+                    .FromSqlRaw("SELECT * FROM V_Lookup_Section_NextSection WHERE NextSection_DB_ID IS NOT NULL")
                     .ToListAsync();
 
-                Console.WriteLine($"[TrackGraph] Found {allConnections.Count} connections from database");
+                // Group connections by source-target pairs to collect all switches for each edge
+                var connectionGroups = viewConnections
+                    .Where(c => c.NextSection_DB_ID.HasValue && !string.IsNullOrEmpty(c.SwitchConstraints))
+                    .GroupBy(c => new { c.Section_DB_ID, c.NextSection_DB_ID, c.Direction });
 
-                var addedConnections = 0;
-                foreach (var connection in allConnections)
+                var enhancedConnections = 0;
+                foreach (var connectionGroup in connectionGroups)
                 {
-                    if (connection.NextSection_DB_ID.HasValue)
+                    var firstConnection = connectionGroup.First();
+                    var allSwitchRequirements = new List<(string SwitchName, string RequiredPosition)>();
+
+                    // Collect all switch configurations for this connection
+                    foreach (var connection in connectionGroup)
                     {
-                        // Add connection in the specified direction
-                        graph.AddEdge(
-                            connection.Section_DB_ID,
-                            connection.NextSection_DB_ID.Value,
-                            null,
-                            null,
-                            connection.Direction,
-                            1.0
-                        );
-                        addedConnections++;
-
-                        // Also add reverse connection for bidirectional travel
-                        // Railway tracks typically allow travel in both directions
-                        graph.AddEdge(
-                            connection.NextSection_DB_ID.Value,
-                            connection.Section_DB_ID,
-                            null,
-                            null,
-                            !connection.Direction,
-                            1.0
-                        );
-                        addedConnections++;
+                        var switchConstraints = ParseSwitchConstraints(connection.SwitchConstraints);
+                        allSwitchRequirements.AddRange(switchConstraints);
                     }
+
+                    // Add a single edge with all switch requirements
+                    graph.AddEdge(
+                        firstConnection.Section_DB_ID,
+                        firstConnection.NextSection_DB_ID.Value,
+                        allSwitchRequirements,
+                        firstConnection.Direction,
+                        1.0
+                    );
+                    enhancedConnections++;
                 }
 
-                Console.WriteLine($"[TrackGraph] Added {addedConnections} directed connections");
-
-                // Try to load enhanced connections with switch constraints from the view
-                try
-                {
-                    var viewConnections = await dbContext.VLookupSectionNextSection
-                        .FromSqlRaw("SELECT * FROM V_Lookup_Section_NextSection WHERE NextSection_DB_ID IS NOT NULL")
-                        .ToListAsync();
-
-                    Console.WriteLine($"[TrackGraph] Found {viewConnections.Count} enhanced connections with switch constraints");
-
-                    var enhancedConnections = 0;
-                    foreach (var connection in viewConnections)
-                    {
-                        if (connection.NextSection_DB_ID.HasValue && !string.IsNullOrEmpty(connection.SwitchConstraints))
-                        {
-                            var switchConstraints = ParseSwitchConstraints(connection.SwitchConstraints);
-                            foreach (var switchConfig in switchConstraints)
-                            {
-                                // Add directed connection with switch constraints
-                                graph.AddEdge(
-                                    connection.Section_DB_ID,
-                                    connection.NextSection_DB_ID.Value,
-                                    switchConfig.SwitchName,
-                                    switchConfig.RequiredPosition,
-                                    connection.Direction == 1,
-                                    1.0
-                                );
-                                enhancedConnections++;
-                            }
-                        }
-                    }
-                    Console.WriteLine($"[TrackGraph] Added {enhancedConnections} enhanced connections with switch constraints");
-                }
-                catch (Exception viewEx)
-                {
-                    Console.WriteLine($"[TrackGraph] View with switch constraints not available, using basic connections: {viewEx.Message}");
-                }
-
-                Console.WriteLine("[TrackGraph] Track connections loaded successfully");
+                logger?.LogInformation("Loaded {ConnectionCount} connections with switch constraints from database view", enhancedConnections);
+                fileLogger?.Log($"[TRACK GRAPH] Loaded {enhancedConnections} connections with switch constraints.");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[TrackGraph] Error loading connections: {ex.Message}");
+                logger?.LogError(ex, "Failed to load track connections from lookup tables");
                 throw;
             }
         }
@@ -217,7 +163,6 @@ namespace ClaudeSepareted.Services
                     };
 
                     configs.Add((switchName, normalizedPosition));
-                    Console.WriteLine($"[TrackGraph] Parsed switch constraint: {switchName} = {normalizedPosition}");
                 }
             }
 
@@ -237,6 +182,7 @@ namespace ClaudeSepareted.Services
                 AllowedSpeed = allowedSpeed
             };
             _edges[id] = new List<TrackEdge>();
+            _nameToNodeId[name] = id;
         }
 
         /// <summary>
@@ -246,18 +192,18 @@ namespace ClaudeSepareted.Services
         {
             if (string.IsNullOrEmpty(stationName)) return;
 
-            // Add multiple variations for Hungarian station names
-            var normalized = stationName.ToLower();
-            _stationToNodeId[normalized] = nodeId;
+            // Add the original station name (dictionary handles case-insensitivity)
+            _stationToNodeId[stationName] = nodeId;
 
-            // Add common variations
-            if (normalized.Contains("felso") || normalized.Contains("felső"))
+            // Add common variations for Hungarian station names (manual character replacements)
+            var stationLower = stationName.ToLower();
+            if (stationLower.Contains("felso") || stationLower.Contains("felső"))
             {
                 _stationToNodeId["felso"] = nodeId;
                 _stationToNodeId["felső"] = nodeId;
                 _stationToNodeId["upper"] = nodeId;
             }
-            else if (normalized.Contains("also") || normalized.Contains("alsó"))
+            else if (stationLower.Contains("also") || stationLower.Contains("alsó"))
             {
                 _stationToNodeId["also"] = nodeId;
                 _stationToNodeId["alsó"] = nodeId;
@@ -272,27 +218,7 @@ namespace ClaudeSepareted.Services
         {
             if (string.IsNullOrEmpty(stationName) || string.IsNullOrEmpty(platformName)) return;
 
-            // Normalize station name - handle different variations
-            var normalizedStation = stationName.ToLower()
-                .Replace("felső", "felso")
-                .Replace("alsó", "also");
-
-            // Normalize platform name - handle different variations
-            var normalizedPlatform = platformName.ToLower()
-                .Replace(" ", "")
-                .Replace("-", "")
-                .Replace("iii", "3")
-                .Replace("ii", "2")
-                .Replace("i", "1");
-
-            // Create multiple platform key variations for robustness
-            var keys = new[]
-            {
-                $"{normalizedStation}-{normalizedPlatform}",
-                $"{stationName.ToLower()}-{platformName.ToLower()}",
-                $"{normalizedStation}-{platformName.ToLower()}",
-                $"{stationName.ToLower()}-{normalizedPlatform}"
-            };
+            var keys = GeneratePlatformKeyVariations(stationName, platformName);
 
             foreach (var key in keys)
             {
@@ -301,101 +227,50 @@ namespace ClaudeSepareted.Services
                     _platformToNodeId[key] = nodeId;
                 }
             }
-
-            Console.WriteLine($"[TrackGraph] ✓ Mapped platform '{stationName}-{platformName}' to node {nodeId} (keys: {string.Join(", ", keys)})");
         }
 
         /// <summary>
         /// Adds an edge (track connection) to the graph
         /// </summary>
-        private void AddEdge(int sourceId, int targetId, string switchName, string switchPosition, bool direction, double length)
+        private void AddEdge(int sourceId, int targetId, List<(string SwitchName, string RequiredPosition)> switchRequirements, bool direction, double length)
         {
             // Ensure both source and target nodes exist in the edges dictionary
             if (!_edges.ContainsKey(sourceId))
             {
                 _edges[sourceId] = new List<TrackEdge>();
-                Console.WriteLine($"[TrackGraph] Created edge list for source node {sourceId}");
             }
 
             if (!_edges.ContainsKey(targetId))
             {
                 _edges[targetId] = new List<TrackEdge>();
-                Console.WriteLine($"[TrackGraph] Created edge list for target node {targetId}");
             }
 
             var edge = new TrackEdge
             {
                 SourceId = sourceId,
                 TargetId = targetId,
-                SwitchName = switchName,
-                RequiredSwitchPosition = switchPosition,
-                Length = length
+                SwitchRequirements = switchRequirements ?? new List<(string SwitchName, string RequiredPosition)>(),
+                Length = length,
+                Direction = direction
             };
 
             _edges[sourceId].Add(edge);
         }
 
-      
         /// <summary>
-        /// Finds the optimal route between two platforms using direct database queries
+        /// Adds an edge (track connection) to the graph with a single switch requirement
+        /// Overload for backward compatibility
         /// </summary>
-        public async Task<RoutePlan> FindRouteAsync(Platforms sourcePlatform, Platforms destinationPlatform, ApplicationDbContext dbContext)
+        private void AddEdge(int sourceId, int targetId, string switchName, string switchPosition, bool direction, double length)
         {
-            if (sourcePlatform == null || destinationPlatform == null)
+            var switchRequirements = new List<(string SwitchName, string RequiredPosition)>();
+            if (!string.IsNullOrEmpty(switchName) && !string.IsNullOrEmpty(switchPosition))
             {
-                Console.WriteLine("[TrackGraph] Invalid platform objects provided");
-                return null;
+                switchRequirements.Add((switchName, switchPosition));
             }
-
-            Console.WriteLine($"[TrackGraph] Platform routing: {sourcePlatform.Station?.Name}-{sourcePlatform.Name} -> {destinationPlatform.Station?.Name}-{destinationPlatform.Name}");
-
-            try
-            {
-                // Use the direct platform pathfinder for simplicity
-                var directPathfinder = new DirectPlatformPathfinder(dbContext);
-                var routeSections = await directPathfinder.FindDirectRouteAsync(sourcePlatform, destinationPlatform);
-
-                if (routeSections == null || !routeSections.Any())
-                {
-                    Console.WriteLine("[TrackGraph] No route found between platforms using direct pathfinder");
-                    return null;
-                }
-
-                // Convert to RoutePlan format
-                var edgePath = new List<EdgeInfo>();
-                for (int i = 0; i < routeSections.Count - 1; i++)
-                {
-                    edgePath.Add(new EdgeInfo
-                    {
-                        SourceNodeId = routeSections[i],
-                        TargetNodeId = routeSections[i + 1],
-                        Length = 1.0
-                    });
-                }
-
-                Console.WriteLine($"[TrackGraph] ✓ Route found with {edgePath.Count} edges: {string.Join(" -> ", routeSections)}");
-
-                return new RoutePlan
-                {
-                    Path = edgePath,
-                    TotalLength = edgePath.Sum(e => e.Length)
-                };
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[TrackGraph] Error finding platform route: {ex.Message}");
-                return null;
-            }
+            AddEdge(sourceId, targetId, switchRequirements, direction, length);
         }
 
-        /// <summary>
-        /// Legacy FindRoute method for backwards compatibility
-        /// </summary>
-        public RoutePlan FindRoute(Platforms sourcePlatform, Platforms destinationPlatform)
-        {
-            Console.WriteLine("[TrackGraph] WARNING: Using legacy FindRoute method. Use FindRouteAsync instead.");
-            return null; // Force use of async version
-        }
 
         /// <summary>
         /// Generates multiple key variations for platform matching
@@ -429,100 +304,6 @@ namespace ClaudeSepareted.Services
             };
         }
 
-        /// <summary>
-        /// Finds a platform node ID from multiple key variations
-        /// </summary>
-        private int FindPlatformNodeId(string[] keys)
-        {
-            foreach (var key in keys)
-            {
-                if (_platformToNodeId.TryGetValue(key, out var nodeId))
-                {
-                    Console.WriteLine($"[TrackGraph] ✓ Found platform mapping using key: '{key}' -> node {nodeId}");
-                    return nodeId;
-                }
-            }
-            return -1; // Not found
-        }
-
-        /// <summary>
-        /// BFS algorithm to find shortest path between two nodes
-        /// </summary>
-        private RoutePlan FindRouteBFS(int sourceId, int destId)
-        {
-            if (sourceId == destId)
-            {
-                return new RoutePlan(); // Empty route for same station
-            }
-
-            var visited = new HashSet<int>();
-            var queue = new Queue<QueueItem>();
-            var parent = new Dictionary<int, EdgeInfo>();
-
-            queue.Enqueue(new QueueItem { NodeId = sourceId, Path = new List<EdgeInfo>() });
-            visited.Add(sourceId);
-
-            while (queue.Count > 0)
-            {
-                var current = queue.Dequeue();
-
-                if (current.NodeId == destId)
-                {
-                    // Found destination, reconstruct path
-                    var path = new List<EdgeInfo>();
-                    var node = destId;
-
-                    while (parent.ContainsKey(node) && node != sourceId)
-                    {
-                        path.Insert(0, parent[node]);
-                        node = parent[node].SourceNodeId;
-                    }
-
-                    Console.WriteLine($"[TrackGraph] Route found with {path.Count} edges");
-                    Console.WriteLine($"[TrackGraph] Path details:");
-                    foreach (var edge in path)
-                    {
-                        Console.WriteLine($"  Edge {edge.SourceNodeId} -> {edge.TargetNodeId}: Switch={edge.SwitchName}, Position={edge.RequiredSwitchPosition}, Length={edge.Length}");
-                    }
-                    return new RoutePlan { Path = path, TotalLength = path.Sum(e => e.Length) };
-                }
-
-                if (!_edges.ContainsKey(current.NodeId))
-                    continue;
-
-                foreach (var edge in _edges[current.NodeId])
-                {
-                    if (!visited.Contains(edge.TargetId))
-                    {
-                        visited.Add(edge.TargetId);
-
-                        var edgeInfo = new EdgeInfo
-                        {
-                            SourceNodeId = edge.SourceId,
-                            TargetNodeId = edge.TargetId,
-                            SwitchName = edge.SwitchName,
-                            RequiredSwitchPosition = edge.RequiredSwitchPosition,
-                            Length = edge.Length
-                        };
-
-                        parent[edge.TargetId] = edgeInfo;
-
-                        var newPath = new List<EdgeInfo>(current.Path);
-                        newPath.Add(edgeInfo);
-
-                        queue.Enqueue(new QueueItem { NodeId = edge.TargetId, Path = newPath });
-                    }
-                }
-            }
-
-            Console.WriteLine("[TrackGraph] No route found between stations");
-            return null; // No route found
-        }
-
-        /// <summary>
-        /// Gets all stations mapped in the graph
-        /// </summary>
-  
         /// <summary>
         /// Validates the graph integrity
         /// </summary>
@@ -559,6 +340,96 @@ namespace ClaudeSepareted.Services
         }
 
         /// <summary>
+        /// Find optimal route between two subsection IDs using in-memory BFS pathfinding
+        /// This is the primary pathfinding method that uses only in-memory graph data
+        /// </summary>
+        public RoutePlan FindRouteInMemory(int sourceSubSectionId, int destSubSectionId, bool? direction = null)
+        {
+            if (sourceSubSectionId == destSubSectionId)
+            {
+                return new RoutePlan(); // Empty route for same location
+            }
+
+            var visited = new HashSet<int>();
+            var queue = new Queue<QueueItem>();
+
+            queue.Enqueue(new QueueItem { NodeId = sourceSubSectionId, CurrentEdge = null, Parent = null });
+            visited.Add(sourceSubSectionId);
+
+            while (queue.Count > 0)
+            {
+                var current = queue.Dequeue();
+
+                if (current.NodeId == destSubSectionId)
+                {
+                    // Reconstruct path backwards
+                    var path = new List<EdgeInfo>();
+                    var currNode = current;
+                    while (currNode.Parent != null)
+                    {
+                        path.Insert(0, currNode.CurrentEdge);
+                        currNode = currNode.Parent;
+                    }
+                    return new RoutePlan { Path = path, TotalLength = path.Sum(e => e.Length) };
+                }
+
+                if (!_edges.ContainsKey(current.NodeId)) continue;
+
+                foreach (var edge in _edges[current.NodeId])
+                {
+                    if (!IsEdgeDirectionMatch(edge, direction)) continue;
+
+                    if (!visited.Contains(edge.TargetId))
+                    {
+                        visited.Add(edge.TargetId);
+                        var edgeInfo = new EdgeInfo
+                        {
+                            SourceNodeId = edge.SourceId,
+                            TargetNodeId = edge.TargetId,
+                            SwitchRequirements = new List<(string SwitchName, string RequiredPosition)>(edge.SwitchRequirements),
+                            Length = edge.Length
+                        };
+                        queue.Enqueue(new QueueItem { NodeId = edge.TargetId, CurrentEdge = edgeInfo, Parent = current });
+                    }
+                }
+            }
+
+            return null; // No route found
+        }
+
+        /// <summary>
+        /// Check if an edge matches the desired direction
+        /// If no direction is specified, all edges are allowed
+        /// </summary>
+        private bool IsEdgeDirectionMatch(TrackEdge edge, bool? desiredDirection)
+        {
+            // If no direction is specified, allow the edge (undirected search)
+            if (!desiredDirection.HasValue)
+                return true;
+
+            // The edge's direction is stored in the graph - it was loaded from the database
+            // with the Direction field from Lookup_Section_NextSection
+            return edge.Direction == desiredDirection.Value;
+        }
+
+        /// <summary>
+        /// Find route between two platforms using in-memory pathfinding
+        /// </summary>
+        public RoutePlan FindPlatformRoute(Platforms sourcePlatform, Platforms destinationPlatform, bool direction)
+        {
+            if (sourcePlatform == null || destinationPlatform == null)
+                return null;
+
+            var sourceSectionId = sourcePlatform.SubSection_DB_ID;
+            var destSectionId = destinationPlatform.SubSection_DB_ID;
+
+            if (sourceSectionId <= 0 || destSectionId <= 0)
+                return null;
+
+            return FindRouteInMemory(sourceSectionId, destSectionId, direction);
+        }
+
+        /// <summary>
         /// Checks if there's a direct connection between two sections
         /// Used by PathOptimizer for route optimization
         /// </summary>
@@ -584,17 +455,92 @@ namespace ClaudeSepareted.Services
         /// <summary>
         /// Gets the required switch configuration for moving from source to target
         /// </summary>
-        public (string SwitchName, string RequiredPosition)? GetSwitchForConnection(int sourceSectionId, int targetSectionId)
+        public List<(string SwitchName, string RequiredPosition)>? GetSwitchesForConnection(int sourceSectionId, int targetSectionId)
         {
             if (!_edges.ContainsKey(sourceSectionId))
                 return null;
 
             var edge = _edges[sourceSectionId].FirstOrDefault(e => e.TargetId == targetSectionId);
-            if (edge != null && !string.IsNullOrEmpty(edge.SwitchName))
+            if (edge != null && edge.SwitchRequirements.Any())
             {
-                return (edge.SwitchName, edge.RequiredSwitchPosition);
+                return new List<(string SwitchName, string RequiredPosition)>(edge.SwitchRequirements);
             }
 
+            return null;
+        }
+
+        /// <summary>
+        /// Gets the node ID for a section name.
+        /// Uses O(1) dictionary lookup instead of O(N) iteration.
+        /// </summary>
+        /// <param name="sectionName">The section name to search for</param>
+        /// <returns>The node ID if found, -1 otherwise</returns>
+        public int GetNodeIdByName(string sectionName)
+        {
+            if (string.IsNullOrWhiteSpace(sectionName))
+                return -1;
+
+            return _nameToNodeId.TryGetValue(sectionName, out var id) ? id : -1;
+        }
+
+        /// <summary>
+        /// Checks if two sections are adjacent (directly connected) in either direction.
+        /// This is a synchronous in-memory lookup that doesn't hit the database.
+        /// </summary>
+        /// <param name="section1Id">First section ID</param>
+        /// <param name="section2Id">Second section ID</param>
+        /// <returns>True if sections are directly connected, false otherwise</returns>
+        public bool AreSectionsAdjacent(int section1Id, int section2Id)
+        {
+            // Check if there's a connection from section1 to section2
+            if (_edges.ContainsKey(section1Id))
+            {
+                if (_edges[section1Id].Any(e => e.TargetId == section2Id))
+                    return true;
+            }
+
+            // Check if there's a connection from section2 to section1
+            if (_edges.ContainsKey(section2Id))
+            {
+                if (_edges[section2Id].Any(e => e.TargetId == section1Id))
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Validates that a connection between two sections matches the requested direction.
+        /// This is a synchronous in-memory lookup that doesn't hit the database.
+        /// </summary>
+        /// <param name="fromId">Source section ID</param>
+        /// <param name="toId">Target section ID</param>
+        /// <param name="direction">Requested direction (true = forward, false = reverse)</param>
+        /// <returns>True if connection exists and direction matches, false otherwise</returns>
+        public bool ValidateConnectionDirection(int fromId, int toId, bool direction)
+        {
+            if (!_edges.ContainsKey(fromId))
+                return false;
+
+            var edge = _edges[fromId].FirstOrDefault(e => e.TargetId == toId);
+            if (edge == null)
+                return false;
+
+            // Check if the edge's direction matches the requested direction
+            return edge.Direction == direction;
+        }
+
+        /// <summary>
+        /// Gets the section name for a given node ID
+        /// </summary>
+        /// <param name="nodeId">The node ID to look up</param>
+        /// <returns>The section name if found, null otherwise</returns>
+        public string GetSectionNameById(int nodeId)
+        {
+            if (_nodes.TryGetValue(nodeId, out var node))
+            {
+                return node.Name;
+            }
             return null;
         }
     }
@@ -616,9 +562,9 @@ namespace ClaudeSepareted.Services
     {
         public int SourceId { get; set; }
         public int TargetId { get; set; }
-        public string SwitchName { get; set; }
-        public string RequiredSwitchPosition { get; set; }
+        public List<(string SwitchName, string RequiredPosition)> SwitchRequirements { get; set; } = new List<(string SwitchName, string RequiredPosition)>();
         public double Length { get; set; }
+        public bool Direction { get; set; } // true = forward, false = reverse
     }
 
     /// <summary>
@@ -627,62 +573,7 @@ namespace ClaudeSepareted.Services
     internal class QueueItem
     {
         public int NodeId { get; set; }
-        public List<EdgeInfo> Path { get; set; }
-    }
-
-    /// <summary>
-    /// Information about a track edge in a route
-    /// </summary>
-    public class EdgeInfo
-    {
-        public int SourceNodeId { get; set; }
-        public int TargetNodeId { get; set; }
-        public string SwitchName { get; set; }
-        public string RequiredSwitchPosition { get; set; }
-        public double Length { get; set; }
-    }
-
-    /// <summary>
-    /// Represents a complete route plan between stations
-    /// </summary>
-    public class RoutePlan
-    {
-        public List<EdgeInfo> Path { get; set; } = new List<EdgeInfo>();
-        public double TotalLength { get; set; }
-
-        /// <summary>
-        /// Gets the unique switches that need to be configured for this route
-        /// </summary>
-        public List<SwitchConfiguration> GetSwitchConfigurations()
-        {
-            var switchConfigs = new Dictionary<string, string>();
-
-            foreach (var edge in Path)
-            {
-                if (!string.IsNullOrEmpty(edge.SwitchName) && !string.IsNullOrEmpty(edge.RequiredSwitchPosition))
-                {
-                    switchConfigs[edge.SwitchName] = edge.RequiredSwitchPosition;
-                }
-            }
-
-            return switchConfigs.Select(kvp => new SwitchConfiguration(kvp.Key, kvp.Value)).ToList();
-        }
-
-        public bool HasPath => Path.Any();
-    }
-
-    /// <summary>
-    /// Switch configuration for a route (existing class maintained for compatibility)
-    /// </summary>
-    public class SwitchConfiguration
-    {
-        public string SwitchName { get; set; }
-        public string Position { get; set; } // "straight" or "turnout"
-
-        public SwitchConfiguration(string switchName, string position)
-        {
-            SwitchName = switchName;
-            Position = position;
-        }
+        public EdgeInfo CurrentEdge { get; set; }
+        public QueueItem Parent { get; set; }
     }
 }

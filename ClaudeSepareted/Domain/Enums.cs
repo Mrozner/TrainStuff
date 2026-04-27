@@ -2,10 +2,11 @@ namespace ClaudeSepareted
 {
     public enum Speed
     {
-        STOP = 0,
+        ZERO = 0,
         SLOW = 30,
         MEDIUM = 60,
-        HIGH = 90
+        HIGH = 90,
+        MAX = 100
     }
 
     public enum TrainState
@@ -13,7 +14,9 @@ namespace ClaudeSepareted
         Waiting,
         Moving,
         Stopped,
-        PrepareToStop
+        PrepareToStop,
+        Arrived,
+        WaitingForClearance  // NEW: Train is stopped waiting for track ahead to clear
     }
 
     public enum EntryState

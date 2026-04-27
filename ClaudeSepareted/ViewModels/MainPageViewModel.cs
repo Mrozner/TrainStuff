@@ -1,20 +1,20 @@
 ﻿using ClaudeSepareted;
+using ClaudeSepareted.Services;
 using Microsoft.EntityFrameworkCore;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using Microsoft.EntityFrameworkCore.Storage;
 
-public class MainPageViewModel : INotifyPropertyChanged
+public class MainPageViewModel : INotifyPropertyChanged, IDisposable
 {
-    private readonly ApplicationDbContext _dbContext;
+    private readonly IDbContextFactory<ApplicationDbContext> _dbContextFactory;
+    private readonly TravelTimeMeasurementService _travelTimeService;
 
     // 1. Observable Properties (Listák)
     public ObservableCollection<Train> Trains { get; set; } = new ObservableCollection<Train>();
     public ObservableCollection<Platforms> Platforms { get; set; } = new ObservableCollection<Platforms>();
     public ObservableCollection<ScheduleItem> ScheduleItems { get; set; } = new ObservableCollection<ScheduleItem>();
-
-    // Helper property for platform display in pickers
-    public ObservableCollection<PlatformDisplayItem> PlatformDisplayItems { get; set; } = new ObservableCollection<PlatformDisplayItem>();
 
     // 2. Observable Properties (Kiválasztott elemek)
     private Train _selectedTrain;
@@ -24,15 +24,15 @@ public class MainPageViewModel : INotifyPropertyChanged
         set { SetProperty(ref _selectedTrain, value); }
     }
 
-    private PlatformDisplayItem _selectedStartPlatform;
-    public PlatformDisplayItem SelectedStartPlatform
+    private Platforms _selectedStartPlatform;
+    public Platforms SelectedStartPlatform
     {
         get => _selectedStartPlatform;
         set { SetProperty(ref _selectedStartPlatform, value); }
     }
 
-    private PlatformDisplayItem _selectedEndPlatform;
-    public PlatformDisplayItem SelectedEndPlatform
+    private Platforms _selectedEndPlatform;
+    public Platforms SelectedEndPlatform
     {
         get => _selectedEndPlatform;
         set { SetProperty(ref _selectedEndPlatform, value); }
@@ -41,93 +41,83 @@ public class MainPageViewModel : INotifyPropertyChanged
     // Virtual Clock ViewModel
     public VirtualClockViewModel VirtualClock { get; private set; }
 
-    public MainPageViewModel(ApplicationDbContext dbContext, VirtualClock virtualClock)
+    public MainPageViewModel(IDbContextFactory<ApplicationDbContext> dbContextFactory, VirtualClock virtualClock, TravelTimeMeasurementService travelTimeService)
     {
-        _dbContext = dbContext;
+        _dbContextFactory = dbContextFactory;
+        _travelTimeService = travelTimeService;
         VirtualClock = new VirtualClockViewModel(virtualClock);
     }
 
     public async Task LoadDataAsync()
     {
-        if (ScheduleItems != null)
-        {
-            MainThread.BeginInvokeOnMainThread(() =>
-            {
-                ScheduleItems.Clear();
-            });
-        }
-
         try
         {
-            var trains = await _dbContext.Trains
-                .Where(t => t.IsActive)
-                .OrderBy(t => t.Name)
-                .ToListAsync();
+            using var dbContext = await _dbContextFactory.CreateDbContextAsync();
 
+            // 1. Load Trains safely
+            var trains = await dbContext.Trains.Where(t => t.IsActive).OrderBy(t => t.Name).ToListAsync();
             MainThread.BeginInvokeOnMainThread(() =>
             {
                 Trains.Clear();
-                foreach (var train in trains)
-                {
-                    Trains.Add(train);
-                }
+                foreach (var train in trains) Trains.Add(train);
             });
 
-            // Peronok betöltése
-            var platforms = await _dbContext.Platforms
+            // 2. Load Platforms safely
+            var platforms = await dbContext.Platforms
                 .Include(p => p.Station)
                 .Where(p => p.IsActive)
                 .OrderBy(p => p.Station.Name)
-                    .ThenBy(p => p.Name)
+                .ThenBy(p => p.Name)
+                .ToListAsync();
+            MainThread.BeginInvokeOnMainThread(() =>
+            {
+                Platforms.Clear();
+                foreach (var platform in platforms) Platforms.Add(platform);
+            });
+
+            // 3. Load Timetable
+            var entries = await dbContext.TimetableEntries
+                .Include(e => e.Train)
+                .Include(e => e.SourcePlatform)
+                .Include(e => e.DestinationPlatform)
                 .ToListAsync();
 
             MainThread.BeginInvokeOnMainThread(() =>
             {
-                Platforms.Clear();
-                PlatformDisplayItems.Clear();
-                foreach (var platform in platforms)
+                ScheduleItems.Clear();
+                foreach (var entry in entries.OrderBy(e => e.StartTime))
                 {
-                    Platforms.Add(platform);
-                    PlatformDisplayItems.Add(new PlatformDisplayItem(platform));
+                    TimeSpan endTime;
+                    if (entry.ArrivedTime.HasValue)
+                    {
+                        endTime = entry.ArrivedTime.Value.TimeOfDay;
+                    }
+                    else
+                    {
+                        // Ask the service if we know how long this train takes on this route
+                        var estimatedDuration = _travelTimeService.GetEstimatedTravelTime(
+                            entry.Train_DB_ID,
+                            entry.SourcePlatform_DB_ID,
+                            entry.DestinationPlatform_DB_ID);
+
+                        // If we have an estimate, add it. If not, use the 2-hour placeholder.
+                        endTime = entry.StartTime.Add(estimatedDuration ?? new TimeSpan(2, 0, 0));
+                    }
+
+                    ScheduleItems.Add(new ScheduleItem
+                    {
+                        TrainName = entry.Train?.Name ?? "Vonat neve hiányzik",
+                        Start = entry.StartTime,
+                        End = endTime,
+                        From = entry.SourcePlatform?.DisplayName ?? "Kiinduló peron hiányzik",
+                        To = entry.DestinationPlatform?.DisplayName ?? "Cél peron hiányzik"
+                    });
                 }
             });
-
-            var entries = await _dbContext.TimetableEntries
-                .Include(e => e.Train)
-                .Include(e => e.SourcePlatform)
-                    .ThenInclude(sp => sp.Station)
-                .Include(e => e.DestinationPlatform)
-                    .ThenInclude(dp => dp.Station)
-                .ToListAsync();
-            foreach (var entry in entries.OrderBy(e => e.StartTime))
-            {
-                // Kiszámoljuk az érkezési időt TimeSpan formában
-                TimeSpan endTime = entry.ArrivedTime.HasValue
-                    ? entry.ArrivedTime.Value.TimeOfDay
-                    : entry.StartTime.Add(new TimeSpan(2, 0, 0));
-                ScheduleItems.Add(new ScheduleItem
-                {
-                    // A navigációs tulajdonságokat (Train, SourcePlatform, DestinationPlatform) használjuk.
-                    TrainName = entry.Train?.Name ?? "Vonat neve hiányzik",
-                    Start = entry.StartTime,
-                    End = endTime,
-                    From = entry.SourcePlatform?.Station?.Name ?? "Kiinduló állomás hiányzik",
-                    To = entry.DestinationPlatform?.Station?.Name ?? "Célállomás hiányzik",
-                    // Add platform-specific information for precise deletion
-                    FromPlatform = entry.SourcePlatform?.Name ?? "Platform hiányzik",
-                    ToPlatform = entry.DestinationPlatform?.Name ?? "Platform hiányzik"
-                });
-            }
-
-
-
-            Console.WriteLine($"Adatok betöltve: {Trains.Count} vonat, {Platforms.Count} peron.");
         }
         catch (Exception ex)
         {
-            // Valamilyen hibakezelés
-            Console.WriteLine($"Hiba az adatok betöltésekor: {ex.Message}");
-            // Itt kellene egy szolgáltatás, ami kiírja a felhasználónak a hibaüzenetet (pl. IAlertService)
+            System.Diagnostics.Debug.WriteLine($"Error loading data: {ex.Message}");
         }
     }
 
@@ -149,17 +139,10 @@ public class MainPageViewModel : INotifyPropertyChanged
         OnPropertyChanged(propertyName);
         return true;
     }
-}
 
-// Helper class for displaying platforms in pickers
-public class PlatformDisplayItem
-{
-    public Platforms Platform { get; set; }
-    public string DisplayName { get; set; }
-
-    public PlatformDisplayItem(Platforms platform)
+    // Dispose pattern to properly clean up resources
+    public void Dispose()
     {
-        Platform = platform;
-        DisplayName = $"{platform.Station?.Name ?? "Unknown"} - {platform.Name}";
+        VirtualClock?.Dispose();
     }
 }

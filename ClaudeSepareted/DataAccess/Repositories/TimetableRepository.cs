@@ -46,7 +46,7 @@ namespace ClaudeSepareted.DataAccess
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error adding entry: {ex.Message}");
+                // Error adding entry
                 return false;
             }
             finally
@@ -80,6 +80,24 @@ namespace ClaudeSepareted.DataAccess
                 var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
                 db.TimetableEntries.Remove(entry);
                 db.SaveChanges();
+            }
+            finally
+            {
+                _semaphore.Release();
+            }
+        }
+
+        public async Task<List<Train>> GetActiveTrainsAsync()
+        {
+            _semaphore.Wait();
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+                return await db.Trains
+                    .Where(t => t.IsActive)
+                    .OrderBy(t => t.Name)
+                    .ToListAsync();
             }
             finally
             {

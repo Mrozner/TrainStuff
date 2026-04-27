@@ -1,83 +1,69 @@
 using System.Collections.Concurrent;
+using ClaudeSepareted.Services;
+using Microsoft.Extensions.Logging;
 
 namespace ClaudeSepareted
 {
     public class StatusNotificationService
     {
         private readonly ConcurrentQueue<StatusMessage> _statusMessages = new();
-        private readonly object _lockObject = new object();
+        private readonly VirtualClock? _virtualClock;
+        private readonly ILogger<StatusNotificationService>? _logger;
+        private readonly Services.FileLoggingService? _fileLogger;
 
         public event Action<StatusMessage>? OnStatusUpdated;
 
-        public StatusNotificationService()
+        // Inject VirtualClock (allow null for testing/fallback)
+        public StatusNotificationService(VirtualClock virtualClock = null, ILogger<StatusNotificationService> logger = null, Services.FileLoggingService fileLogger = null)
         {
-            Console.WriteLine("StatusNotificationService initialized");
+            _virtualClock = virtualClock;
+            _logger = logger;
+            _fileLogger = fileLogger;
         }
 
         public void ShowInfo(string message, string? trainName = null)
-        {
-            var status = new StatusMessage
-            {
-                Type = StatusType.Info,
-                Message = message,
-                TrainName = trainName,
-                Timestamp = DateTime.UtcNow
-            };
-
-            AddStatus(status);
-        }
+            => DispatchMessage(StatusType.Info, message, trainName);
 
         public void ShowSuccess(string message, string? trainName = null)
-        {
-            var status = new StatusMessage
-            {
-                Type = StatusType.Success,
-                Message = message,
-                TrainName = trainName,
-                Timestamp = DateTime.UtcNow
-            };
-
-            AddStatus(status);
-        }
+            => DispatchMessage(StatusType.Success, message, trainName);
 
         public void ShowWarning(string message, string? trainName = null)
-        {
-            var status = new StatusMessage
-            {
-                Type = StatusType.Warning,
-                Message = message,
-                TrainName = trainName,
-                Timestamp = DateTime.UtcNow
-            };
-
-            AddStatus(status);
-        }
+            => DispatchMessage(StatusType.Warning, message, trainName);
 
         public void ShowError(string message, string? trainName = null)
+            => DispatchMessage(StatusType.Error, message, trainName);
+
+        public void ShowTrainStatus(string trainName, string status, string? details = null)
+            => DispatchMessage(StatusType.TrainStatus, status, trainName, details);
+
+        /// <summary>
+        /// Centralized dispatch method that creates and broadcasts status messages.
+        /// Eliminates code duplication across all public notification methods.
+        /// </summary>
+        private void DispatchMessage(StatusType type, string message, string? trainName, string? details = null)
         {
+            // Centralized logging - all status notifications are automatically logged
+            if (_logger != null)
+            {
+                if (type == StatusType.Error) _logger.LogError("{Message} - Train: {Train} - [StatusNotificationService]", message, trainName ?? "System");
+                else if (type == StatusType.Warning) _logger.LogWarning("{Message} - Train: {Train}", message, trainName ?? "System");
+                else _logger.LogInformation("{Message} - Train: {Train}", message, trainName ?? "System");
+            }
+
+            // Log to file for persistent tracking
+            _fileLogger?.Log($"[{type.ToString().ToUpper()}] {trainName ?? "SYSTEM"}: {message}");
+
             var status = new StatusMessage
             {
-                Type = StatusType.Error,
+                Type = type,
                 Message = message,
                 TrainName = trainName,
-                Timestamp = DateTime.UtcNow
+                Details = details,
+                Timestamp = DateTime.UtcNow,
+                VirtualTimestamp = _virtualClock?.CurrentTime ?? DateTime.UtcNow
             };
 
             AddStatus(status);
-        }
-
-        public void ShowTrainStatus(string trainName, string status, string? details = null)
-        {
-            var message = new StatusMessage
-            {
-                Type = StatusType.TrainStatus,
-                Message = status,
-                TrainName = trainName,
-                Details = details,
-                Timestamp = DateTime.UtcNow
-            };
-
-            AddStatus(message);
         }
 
         private void AddStatus(StatusMessage status)
@@ -93,9 +79,6 @@ namespace ClaudeSepareted
 
             // Notify listeners
             OnStatusUpdated?.Invoke(status);
-
-            // Log to console for debugging
-            Console.WriteLine($"[{status.Timestamp:HH:mm:ss}] [{status.Type}] {status.TrainName ?? "System"}: {status.Message}");
         }
 
         public List<StatusMessage> GetRecentMessages(int count = 10)
@@ -105,19 +88,11 @@ namespace ClaudeSepareted
 
         public void ClearStatus()
         {
-            lock (_lockObject)
-            {
-                while (_statusMessages.TryDequeue(out _)) { }
-            }
+            // Clear() is natively thread-safe for ConcurrentQueue in .NET 10
+            _statusMessages.Clear();
 
-            var clearStatus = new StatusMessage
-            {
-                Type = StatusType.Info,
-                Message = "Status cleared",
-                Timestamp = DateTime.UtcNow
-            };
-
-            OnStatusUpdated?.Invoke(clearStatus);
+            // Use centralized dispatch method for consistency
+            DispatchMessage(StatusType.Info, "Status cleared", null);
         }
     }
 
@@ -127,7 +102,8 @@ namespace ClaudeSepareted
         public string Message { get; set; } = "";
         public string? TrainName { get; set; }
         public string? Details { get; set; }
-        public DateTime Timestamp { get; set; }
+        public DateTime Timestamp { get; set; }          // Real-world time (UTC)
+        public DateTime VirtualTimestamp { get; set; }   // Simulated timetable time
     }
 
     public enum StatusType

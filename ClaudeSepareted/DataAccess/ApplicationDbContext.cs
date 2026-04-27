@@ -16,8 +16,6 @@ namespace ClaudeSepareted
         public DbSet<Switches> Switches { get; set; }
         public DbSet<Objects> Objects { get; set; }
         public DbSet<TimetableEntries> TimetableEntries { get; set; }
-        public DbSet<TimetableEntriesArrived> TimetableEntriesArrived { get; set; }
-        public DbSet<TimetableEntriesUpcoming> TimetableEntriesUpcoming { get; set; }
         public DbSet<TrackConnection> TrackConnections { get; set; }
         public DbSet<VLookupSectionNextSection> VLookupSectionNextSection { get; set; }
         public DbSet<VPlatformEntry> VPlatformEntry { get; set; }
@@ -48,97 +46,33 @@ namespace ClaudeSepareted
                 .Property(e => e.ObjectType)
                 .HasConversion<string>();
 
-            modelBuilder.Entity<TimetableEntries>()
-                .Property(e => e.EntryState)
-                .HasConversion<string>();
+            // Configure TimetableEntries
+            modelBuilder.Entity<TimetableEntries>(entity =>
+            {
+                // 1. Trigger bypass to prevent OUTPUT clause crashes
+                entity.ToTable(tb => tb.HasTrigger("PreventOutputClauseTrigger"));
 
-            modelBuilder.Entity<TimetableEntries>()
-                .Property(e => e.RouteState)
-                .HasConversion<string>();
+                // 2. Enum Conversions (Fixes the 'Upcoming' to int crash)
+                entity.Property(e => e.EntryState).HasConversion<string>();
+                entity.Property(e => e.RouteState).HasConversion<string>();
 
-            modelBuilder.Entity<TimetableEntriesArrived>()
-                .Property(e => e.RouteState)
-                .HasConversion<string>();
+                // 3. Explicit Foreign Keys (Fixes the Invalid Column Name crash)
+                // Forces EF Core to look for the FKs on TimetableEntries, not on the Platforms table
+                entity.HasOne(e => e.SourcePlatform)
+                      .WithMany()
+                      .HasForeignKey(e => e.SourcePlatform_DB_ID)
+                      .OnDelete(DeleteBehavior.Restrict);
 
-            modelBuilder.Entity<TimetableEntriesUpcoming>()
-                .Property(e => e.EntryState)
-                .HasConversion<string>();
+                entity.HasOne(e => e.DestinationPlatform)
+                      .WithMany()
+                      .HasForeignKey(e => e.DestinationPlatform_DB_ID)
+                      .OnDelete(DeleteBehavior.Restrict);
 
-            modelBuilder.Entity<TimetableEntriesUpcoming>()
-                .Property(e => e.RouteState)
-                .HasConversion<string>();
-
-            // Configure TimetableEntries relationships
-            modelBuilder.Entity<TimetableEntries>()
-                .HasOne(e => e.Train)
-                .WithMany()
-                .HasForeignKey(e => e.Train_DB_ID);
-
-            modelBuilder.Entity<TimetableEntries>()
-                .Property(e => e.SourcePlatform_DB_ID)
-                .HasColumnName("SourcePlatform_DB_ID");
-
-            modelBuilder.Entity<TimetableEntries>()
-                .Property(e => e.DestinationPlatform_DB_ID)
-                .HasColumnName("DestinationPlatform_DB_ID");
-
-            modelBuilder.Entity<TimetableEntries>()
-                .HasOne(e => e.SourcePlatform)
-                .WithMany()
-                .HasForeignKey(e => e.SourcePlatform_DB_ID);
-
-            modelBuilder.Entity<TimetableEntries>()
-                .HasOne(e => e.DestinationPlatform)
-                .WithMany()
-                .HasForeignKey(e => e.DestinationPlatform_DB_ID);
-
-            // Configure TimetableEntriesArrived relationships
-            modelBuilder.Entity<TimetableEntriesArrived>()
-                .HasOne(e => e.Train)
-                .WithMany()
-                .HasForeignKey(e => e.Train_DB_ID);
-
-            modelBuilder.Entity<TimetableEntriesArrived>()
-                .Property(e => e.SourcePlatform_DB_ID)
-                .HasColumnName("SourcePlatform_DB_ID");
-
-            modelBuilder.Entity<TimetableEntriesArrived>()
-                .Property(e => e.DestinationPlatform_DB_ID)
-                .HasColumnName("DestinationPlatform_DB_ID");
-
-            modelBuilder.Entity<TimetableEntriesArrived>()
-                .HasOne(e => e.SourcePlatform)
-                .WithMany()
-                .HasForeignKey(e => e.SourcePlatform_DB_ID);
-
-            modelBuilder.Entity<TimetableEntriesArrived>()
-                .HasOne(e => e.DestinationPlatform)
-                .WithMany()
-                .HasForeignKey(e => e.DestinationPlatform_DB_ID);
-
-            // Configure TimetableEntriesUpcoming relationships
-            modelBuilder.Entity<TimetableEntriesUpcoming>()
-                .HasOne(e => e.Train)
-                .WithMany()
-                .HasForeignKey(e => e.Train_DB_ID);
-
-            modelBuilder.Entity<TimetableEntriesUpcoming>()
-                .Property(e => e.SourcePlatform_DB_ID)
-                .HasColumnName("SourcePlatform_DB_ID");
-
-            modelBuilder.Entity<TimetableEntriesUpcoming>()
-                .Property(e => e.DestinationPlatform_DB_ID)
-                .HasColumnName("DestinationPlatform_DB_ID");
-
-            modelBuilder.Entity<TimetableEntriesUpcoming>()
-                .HasOne(e => e.SourcePlatform)
-                .WithMany()
-                .HasForeignKey(e => e.SourcePlatform_DB_ID);
-
-            modelBuilder.Entity<TimetableEntriesUpcoming>()
-                .HasOne(e => e.DestinationPlatform)
-                .WithMany()
-                .HasForeignKey(e => e.DestinationPlatform_DB_ID);
+                entity.HasOne(e => e.Train)
+                      .WithMany()
+                      .HasForeignKey(e => e.Train_DB_ID)
+                      .OnDelete(DeleteBehavior.Restrict);
+            });
 
             // Configure Platforms relationships
             modelBuilder.Entity<Platforms>()

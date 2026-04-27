@@ -25,15 +25,15 @@
                         Title="Válassz indulási peront"
                         ItemDisplayBinding="{Binding DisplayName}"
                         SelectedItem="{Binding SelectedStartPlatform}"
-                        ItemsSource="{Binding PlatformDisplayItems}">
+                        ItemsSource="{Binding Platforms}">
                 </Picker>
 
                 <!-- Végállomás/peron -->
                 <Picker x:Name="EndPicker"
-                        Title="Válassz célperont"
+                        Title="Válassz cél peront"
                         ItemDisplayBinding="{Binding DisplayName}"
                         SelectedItem="{Binding SelectedEndPlatform}"
-                        ItemsSource="{Binding PlatformDisplayItems}">
+                        ItemsSource="{Binding Platforms}">
                 </Picker>
 
                 <!-- Idők egymás mellett -->
@@ -190,20 +190,6 @@
                     <VerticalStackLayout Spacing="20"
                                      VerticalOptions="End"
                                      HorizontalOptions="Center">
-                        <!-- Fejlesztői mód gomb -->
-                        <Frame Padding="0"
-                           WidthRequest="60"
-                           HeightRequest="60"
-                           CornerRadius="30"
-                           BackgroundColor="#2196F3"
-                           HasShadow="True">
-                            <Button Text="🛠️"
-                                FontSize="24"
-                                BackgroundColor="Transparent"
-                                TextColor="White"
-                                Clicked="AdminPanel"/>
-                        </Frame>
-
                         <!-- Hozzáad gomb -->
                         <Frame Padding="0"
                            WidthRequest="60"

@@ -5,7 +5,7 @@ using System.Runtime.CompilerServices;
 
 namespace ClaudeSepareted
 {
-    public class VirtualClockViewModel : INotifyPropertyChanged
+    public class VirtualClockViewModel : INotifyPropertyChanged, IDisposable
     {
         private readonly VirtualClock _virtualClock;
         private DateTime _currentTime;
@@ -104,10 +104,18 @@ namespace ClaudeSepareted
 
         private void OnVirtualTimeChanged(object? sender, DateTime newTime)
         {
-            MainThread.BeginInvokeOnMainThread(() =>
+            try
             {
-                CurrentTime = newTime;
-            });
+                MainThread.BeginInvokeOnMainThread(() =>
+                {
+                    CurrentTime = newTime;
+                });
+            }
+            catch (InvalidOperationException)
+            {
+                // Main thread is not available (likely during app shutdown)
+                // Silently ignore this error as it's expected during disposal
+            }
         }
 
         public void SetSpeed(double multiplier)
@@ -166,6 +174,16 @@ namespace ClaudeSepareted
             backingStore = value;
             OnPropertyChanged(propertyName);
             return true;
+        }
+
+        public void Dispose()
+        {
+            // Unsubscribe from the virtual clock events to prevent memory leaks
+            // and to prevent the callback from being called after disposal
+            if (_virtualClock != null)
+            {
+                _virtualClock.TimeChanged -= OnVirtualTimeChanged;
+            }
         }
     }
 }

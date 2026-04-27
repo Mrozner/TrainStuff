@@ -19,74 +19,12 @@ namespace ClaudeSepareted
         [NotMapped]
         public DateTime? ArrivedTime { get; set; }
 
-        // Navigation
+        // Navigation properties
         [ForeignKey(nameof(SourcePlatform_DB_ID))]
         public Platforms SourcePlatform { get; set; }
         [ForeignKey(nameof(DestinationPlatform_DB_ID))]
         public Platforms DestinationPlatform { get; set; }
         [ForeignKey(nameof(Train_DB_ID))]
         public Train Train { get; set; }
-
-        // Convenience properties to access station through platform
-        [NotMapped]
-        public Stations SourceStation => SourcePlatform?.Station;
-        [NotMapped]
-        public Stations DestinationStation => DestinationPlatform?.Station;
-    }
-
-    public class TimetableEntriesArrived
-    {
-        [Key]
-        public int DB_ID { get; set; }
-        public string EntryID { get; set; } = Guid.NewGuid().ToString();
-        public int SourcePlatform_DB_ID { get; set; }
-        public int DestinationPlatform_DB_ID { get; set; }
-        public int Train_DB_ID { get; set; }
-        public DateTime StartDate { get; set; }
-        public TimeSpan StartTime { get; set; }
-        public RouteState RouteState { get; set; }
-        public DateTime ArrivedTime { get; set; }
-
-        // Navigation
-        [ForeignKey(nameof(SourcePlatform_DB_ID))]
-        public Platforms SourcePlatform { get; set; }
-        [ForeignKey(nameof(DestinationPlatform_DB_ID))]
-        public Platforms DestinationPlatform { get; set; }
-        [ForeignKey(nameof(Train_DB_ID))]
-        public Train Train { get; set; }
-
-        // Convenience properties to access station through platform
-        [NotMapped]
-        public Stations SourceStation => SourcePlatform?.Station;
-        [NotMapped]
-        public Stations DestinationStation => DestinationPlatform?.Station;
-    }
-
-    public class TimetableEntriesUpcoming
-    {
-        [Key]
-        public int DB_ID { get; set; }
-        public string EntryID { get; set; } = Guid.NewGuid().ToString();
-        public int SourcePlatform_DB_ID { get; set; }
-        public int DestinationPlatform_DB_ID { get; set; }
-        public int Train_DB_ID { get; set; }
-        public DateTime StartDate { get; set; }
-        public TimeSpan StartTime { get; set; }
-        public EntryState EntryState { get; set; }
-        public RouteState RouteState { get; set; }
-
-        // Navigation
-        [ForeignKey(nameof(SourcePlatform_DB_ID))]
-        public Platforms SourcePlatform { get; set; }
-        [ForeignKey(nameof(DestinationPlatform_DB_ID))]
-        public Platforms DestinationPlatform { get; set; }
-        [ForeignKey(nameof(Train_DB_ID))]
-        public Train Train { get; set; }
-
-        // Convenience properties to access station through platform
-        [NotMapped]
-        public Stations SourceStation => SourcePlatform?.Station;
-        [NotMapped]
-        public Stations DestinationStation => DestinationPlatform?.Station;
     }
 }

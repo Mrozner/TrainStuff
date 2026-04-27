@@ -40,6 +40,9 @@ namespace ClaudeSepareted
 
         [ForeignKey(nameof(Station_DB_ID))]
         public Stations Station { get; set; }
+
+        [System.ComponentModel.DataAnnotations.Schema.NotMapped]
+        public string DisplayName => $"{Station?.Name} - {Name}";
     }
 
     public class Switches

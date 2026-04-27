@@ -1,60 +1,46 @@
 ﻿using ClaudeSepareted.Domain;
 using ClaudeSepareted.Services;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Maui.Controls;
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
 
 namespace ClaudeSepareted
 {
     public partial class AdminPanelPage : ContentPage
     {
-        private readonly ApplicationDbContext _dbContext;
-        private readonly AdminMQTTService _mqttService;
         private readonly StatusNotificationService _statusService;
+        private readonly TrackHandlerService _trackHandlerService;
+        private readonly PathfindingService _pathfinder;
         private readonly List<Label> _statusLabels = new List<Label>();
         private const int MaxStatusMessages = 50;
 
-        public AdminPanelPage(ApplicationDbContext dbContext, AdminMQTTService mqttService, StatusNotificationService statusService)
+        public AdminPanelPage(StatusNotificationService statusService, TrackHandlerService trackHandlerService, PathfindingService pathfinder)
         {
             InitializeComponent();
-            _dbContext = dbContext;
-            _mqttService = mqttService;
             _statusService = statusService;
-
-            LoadTrains();
-            LoadSpeeds();
-            LoadDirections();
+            _trackHandlerService = trackHandlerService;
+            _pathfinder = pathfinder;
 
             InitializeStatusBar();
         }
 
-        private async void LoadTrains()
+        protected override void OnAppearing()
         {
-            var trains = await _dbContext.Trains
-                .Where(t => t.IsActive)
-                .OrderBy(t => t.Name)
-                .ToListAsync();
-
-            TrainPicker.ItemsSource = trains;
+            base.OnAppearing();
+            // Ensure we don't double-subscribe
+            _statusService.OnStatusUpdated -= OnStatusUpdated;
+            _statusService.OnStatusUpdated += OnStatusUpdated;
         }
 
-        private void LoadSpeeds()
+        protected override void OnDisappearing()
         {
-            SpeedPicker.ItemsSource = Enum.GetNames(typeof(Speed));
-        }
-
-        private void LoadDirections()
-        {
-            DirectionPicker.ItemsSource = Enum.GetNames(typeof(Direction));
+            base.OnDisappearing();
+            // Detach the event to prevent memory leaks and ghost UI updates
+            _statusService.OnStatusUpdated -= OnStatusUpdated;
         }
 
         private void InitializeStatusBar()
         {
-            _statusService.OnStatusUpdated += OnStatusUpdated;
-
             // Load recent status messages
             LoadRecentStatusMessages();
 
@@ -89,9 +75,11 @@ namespace ClaudeSepareted
 
         private void OnStatusUpdated(StatusMessage status)
         {
-            // Update UI on main thread
             MainThread.BeginInvokeOnMainThread(() =>
             {
+                // Safety check: if the page is no longer attached to a window, do not update UI
+                if (this.Window == null) return;
+
                 UpdateStatusBar(status);
             });
         }
@@ -148,93 +136,33 @@ namespace ClaudeSepareted
                 StatusType.Warning => Colors.Orange,
                 StatusType.Error => Colors.Red,
                 StatusType.TrainStatus => Colors.Blue,
-                StatusType.Info => Colors.Gray,
-                _ => Colors.Black
+                StatusType.Info => Colors.LightGray,
+                _ => Colors.White
             };
         }
 
-        private async void OnStartClicked(object sender, EventArgs e)
+        private async void OnForceMidnightResetClicked(object sender, EventArgs e)
         {
-            var selectedTrain = TrainPicker.SelectedItem as Train;
-            var selectedSpeed = SpeedPicker.SelectedItem?.ToString();
-            var selectedDirection = DirectionPicker.SelectedItem?.ToString();
-
-            if (selectedTrain == null)
+            bool confirm = await DisplayAlert("Megerősítés", "Biztosan alaphelyzetbe állítod a rendszert (Éjféli Reset)?", "Igen", "Nem");
+            if (confirm)
             {
-                _statusService.ShowError("Kérjük, válasszon vonatot!");
-                return;
+                await _trackHandlerService.ForceSystemResetAsync();
+                await DisplayAlert("Siker", "Rendszer alaphelyzetbe állítva.", "OK");
             }
+        }
 
-            if (string.IsNullOrEmpty(selectedSpeed))
+        private async void OnRebuildCacheClicked(object sender, EventArgs e)
+        {
+            bool confirm = await DisplayAlert("Megerősítés", "Újraépíted az útvonal gyorsítótárat? Ez eltarthat néhány másodpercig.", "Igen", "Nem");
+            if (confirm)
             {
-                _statusService.ShowError("Kérjük, válasszon sebességet!");
-                return;
-            }
-
-            if (string.IsNullOrEmpty(selectedDirection))
-            {
-                _statusService.ShowError("Kérjük, válasszon irányt!");
-                return;
-            }
-
-            // Disable button to prevent multiple clicks
-            ((Button)sender).IsEnabled = false;
-
-            try
-            {
-                // Parse speed and direction
-                if (Enum.TryParse<Speed>(selectedSpeed, true, out Speed speed) &&
-                    Enum.TryParse<Direction>(selectedDirection, true, out Direction direction))
-                {
-                    // Show start status
-                    _statusService.ShowInfo($"Indítás: {selectedTrain.Name} -> {selectedSpeed} ({direction})", selectedTrain.Name);
-
-                    // Send MQTT command asynchronously
-                    bool success = await Task.Run(async () =>
-                    {
-                        return await _mqttService.SendTrainSpeedCommandAsync(selectedTrain.Name, speed, direction);
-                    });
-
-                    if (success)
-                    {
-                        _statusService.ShowSuccess($"Vonat elindítva: {selectedTrain.Name} ({speed})", selectedTrain.Name);
-                    }
-                    else
-                    {
-                        _statusService.ShowError($"MQTT hiba: {selectedTrain.Name} sebesség beállítása sikertelen", selectedTrain.Name);
-                    }
-                }
-                else
-                {
-                    _statusService.ShowError($"Érvénytelen sebesség vagy irány: {selectedSpeed}/{selectedDirection}", selectedTrain.Name);
-                }
-            }
-            catch (Exception ex)
-            {
-                _statusService.ShowError($"Hiba történt: {ex.Message}", selectedTrain.Name);
-            }
-            finally
-            {
-                // Re-enable button
-                ((Button)sender).IsEnabled = true;
+                _statusService.ShowInfo("Útvonal gyorsítótár újraépítése folyamatban...");
+                await _pathfinder.BuildRoutingTableAsync(forceRebuild: true);
+                await DisplayAlert("Siker", "Útvonal gyorsítótár újraépítve és elmentve.", "OK");
             }
         }
 
         // Route planner functionality has been removed
-
-        private void AddStatusMessage(string message)
-        {
-            // Log to console for now since StatusContainer UI element doesn't exist
-            Console.WriteLine($"[AdminPanel] [{DateTime.Now:HH:mm:ss}] {message}");
-
-            // Also show as status notification
-            if (message.Contains("✅"))
-                _statusService.ShowSuccess(message);
-            else if (message.Contains("❌"))
-                _statusService.ShowError(message);
-            else
-                _statusService.ShowInfo(message);
-        }
 
     }
 }
