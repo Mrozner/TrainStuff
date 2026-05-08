@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dotnet build:*)",
+      "Bash(rm:*)",
+      "Bash(dotnet:*)",
+      "WebSearch",
+      "Bash(move:*)",
+      "Bash(timeout:*)",
+      "Bash(csc:*)",
+      "Bash(rd:*)",
+      "Bash(findstr:*)",
+      "Bash(dir:*)",
+      "Bash(sqlcmd:*)",
+      "Bash(dotnet-ef migrations add:*)",
+      "Bash(ls:*)",
+      "Bash(Select-String:*)",
+      "Bash(Select-Object -Last 20)",
+      "Bash(pip install:*)",
+      "Bash(python -m desloppify update-skill claude)",
+      "Bash(\"C:\\\\Users\\\\Ipar 4.0\\\\AppData\\\\Local\\\\Python\\\\pythoncore-3.14-64\\\\Scripts\\\\desloppify.exe\" update-skill claude)",
+      "Bash(wsl --status 2>&1 || echo \"WSL not available\")",
+      "Bash(sed -i '401d' TrackOccupancyService.cs)",
+      "Bash(sed -i '400d' TrackOccupancyService.cs)",
+      "Bash(sed -i '399d' TrackOccupancyService.cs)",
+      "Bash(find:*)",
+      "PowerShell(Get-ChildItem -Path . -Recurse -Directory | Where-Object { $_.Name -eq \"Domain\" -or $_.Name -eq \"DataAccess\" -or $_.Name -eq \"Models\" } | Select-Object -First 10 FullName)",
+      "Bash(xargs grep -l \"Kritikus letérés\")"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
